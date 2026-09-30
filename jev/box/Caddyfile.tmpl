@@ -1,0 +1,48 @@
+# Caddy for the Jev box. setup.sh installs this as /etc/caddy/Caddyfile; the
+# {$...} values come from /etc/caddy/jev.env (0600, systemd EnvironmentFile),
+# so no key is written into this file.
+#
+# - https://<ip-with-dashes>.sslip.io with automatic HTTPS (Let's Encrypt).
+# - GET /healthz is open and never logged.
+# - /v1/* needs "Authorization: Bearer <one client key>"; everything else 401.
+# - Authenticated calls, and only those, go to /var/log/caddy/jev.log as JSON
+#   with the client's name: that file's mtime is the watchdog's "last request".
+{
+	admin off
+}
+
+{$JEV_HOST} {
+	log {
+		output file /var/log/caddy/jev.log
+		format json
+	}
+
+	@health path /healthz
+	handle @health {
+		log_skip
+		respond "ok" 200
+	}
+
+	@orchestrator {
+		path /v1/*
+		header Authorization "Bearer {$JEV_KEY_ORCHESTRATOR}"
+	}
+	handle @orchestrator {
+		log_append client orchestrator
+		reverse_proxy 127.0.0.1:8765
+	}
+
+	@app {
+		path /v1/*
+		header Authorization "Bearer {$JEV_KEY_APP}"
+	}
+	handle @app {
+		log_append client app
+		reverse_proxy 127.0.0.1:8765
+	}
+
+	handle {
+		log_skip
+		respond "unauthorized" 401
+	}
+}

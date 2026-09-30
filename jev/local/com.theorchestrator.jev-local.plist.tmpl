@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Rendered by jev/local/install.sh into ~/Library/LaunchAgents. CPU only, loopback only. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.theorchestrator.jev-local</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RUNTIME__/venv/bin/python</string>
+    <string>__REPO__/jev/local/serve_local.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__RUNTIME__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HF_HUB_OFFLINE</key>
+    <string>1</string>
+    <key>LAYA_THREADS</key>
+    <string>4</string>
+    <key>LAYA_DEVICE</key>
+    <string>cpu</string>
+    <key>JEV_LOCAL_PORT</key>
+    <string>8766</string>
+    <key>HF_HOME</key>
+    <string>__HF_HOME__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <__RUN_AT_LOAD__/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.config/jev/local.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.config/jev/local.log</string>
+</dict>
+</plist>

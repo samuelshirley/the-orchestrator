@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": false
+  },
+  "include": [
+    "server.ts",
+    "host.ts",
+    "contract.ts",
+    "model.ts",
+    "store.ts",
+    "claims.ts",
+    "validation.ts",
+    "profiles.ts",
+    "prompts.ts",
+    "worktrees.ts",
+    "attention.ts",
+    "builderguard.ts",
+    "jevwatch.ts",
+    "jev",
+    "*.test.ts",
+    "app.tsx",
+    "components",
+    "lib",
+    "hooks"
+  ]
+}

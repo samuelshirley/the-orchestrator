@@ -1,0 +1,1 @@
+One page to run all your projects through a single project manager, Patches. Tell her what you want; she starts a task per piece of work, each task researches and builds in its own worktree, and every question comes back as one ticket per task. PRs reach you only when they are proven green for their latest commit, with a list of what to test by hand. Merging is always yours.

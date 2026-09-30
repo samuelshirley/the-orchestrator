@@ -1,0 +1,471 @@
+/* The Orchestrator's own treatments. Every colour is a host theme variable,
+   except --orc-project: the project tile colour, set inline from a small
+   fixed palette (model.ts PALETTE) that reads on light and dark themes, and
+   the Live box's terminal panes, which stay dark in both. */
+
+/* ------------------------------------------------------------ working */
+
+.orc-progress {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
+.orc-progress::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  background: var(--primary);
+  animation: orc-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes orc-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+.orc-dots {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.orc-dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--primary);
+  animation: orc-breathe 1.2s ease-in-out infinite;
+}
+
+.orc-dots > span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.orc-dots > span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes orc-breathe {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------ project tints */
+
+.orc-swatch {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--orc-project);
+  cursor: pointer;
+}
+
+.orc-swatch:hover {
+  outline: 2px solid color-mix(in oklab, var(--orc-project) 45%, transparent);
+  outline-offset: 1px;
+}
+
+.orc-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--orc-project);
+}
+
+.orc-task-tab {
+  border-left: 3px solid var(--orc-project);
+}
+
+.orc-agent {
+  border-left: 3px solid var(--orc-project);
+}
+
+.orc-agent-asking {
+  box-shadow: inset 0 0 0 1px var(--warning);
+}
+
+.orc-ticket {
+  border-left: 4px solid var(--orc-project);
+}
+
+/* ---------------------------------------------------------- task rows */
+
+.orc-row > td {
+  background: color-mix(in oklab, var(--orc-project) 8%, var(--card));
+  vertical-align: top;
+}
+
+.orc-row:hover > td {
+  background: color-mix(in oklab, var(--orc-project) 14%, var(--card));
+}
+
+.orc-row > td:first-child {
+  border-left: 4px solid var(--orc-project);
+  border-top-left-radius: 8px;
+  border-bottom-left-radius: 8px;
+}
+
+.orc-row > td:last-child {
+  border-top-right-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+
+/* The owner's ×: out of the way until the row is hovered or the button has focus. */
+.orc-delete {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--muted-foreground);
+  opacity: 0;
+}
+
+.orc-deletable:hover .orc-delete,
+.orc-delete:focus-visible {
+  opacity: 1;
+}
+
+.orc-delete:hover,
+.orc-delete:focus-visible {
+  color: var(--destructive);
+  background: color-mix(in oklab, var(--destructive) 12%, transparent);
+}
+
+.orc-row-selected > td {
+  box-shadow:
+    inset 0 1px 0 var(--primary),
+    inset 0 -1px 0 var(--primary);
+}
+
+.orc-td {
+  padding: 8px 12px;
+  min-width: 0;
+}
+
+.orc-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  padding-top: 4px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.orc-cell-working {
+  color: var(--foreground);
+}
+
+.orc-cell-done {
+  color: var(--foreground);
+}
+
+.orc-cell-blocked {
+  color: var(--warning-text);
+}
+
+.orc-cell-failed {
+  color: var(--destructive);
+}
+
+/* ------------------------------------------------------------ PR state */
+
+.orc-pr {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  align-self: flex-start;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.orc-pr-running {
+  color: var(--warning-text);
+  border-color: color-mix(in oklab, var(--warning) 55%, transparent);
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--warning) 22%, transparent) 0 6px,
+    color-mix(in oklab, var(--warning) 10%, transparent) 6px 12px
+  );
+  background-size: 34px 34px;
+  animation: orc-stripes 1.2s linear infinite;
+}
+
+@keyframes orc-stripes {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 34px 0;
+  }
+}
+
+.orc-pr-ready {
+  color: var(--success-foreground, var(--foreground));
+  background: color-mix(in oklab, var(--success) 85%, transparent);
+}
+
+.orc-pr-failing {
+  color: var(--destructive-foreground, var(--foreground));
+  background: var(--destructive);
+}
+
+.orc-pr-stale {
+  color: var(--muted-foreground);
+  background: var(--muted);
+  border: 1px dashed var(--warning-text);
+}
+
+.orc-pr-draft,
+.orc-pr-open,
+.orc-pr-merged,
+.orc-pr-closed {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+/* ------------------------------------------------------------ You cell */
+
+.orc-you {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.orc-you-attention {
+  color: var(--warning-text);
+}
+
+.orc-you-ready {
+  color: var(--foreground);
+}
+
+.orc-you-ready > svg {
+  color: var(--success);
+}
+
+/* ------------------------------------------------------- liveness */
+
+/* An agent of the task is mid-turn (live status, confirmed every 30 s). */
+.orc-spinner {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  border: 2px solid color-mix(in oklab, var(--success) 25%, transparent);
+  border-top-color: var(--success);
+  animation: orc-spin 0.9s linear infinite;
+}
+
+@keyframes orc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.orc-live-waiting {
+  color: var(--warning-text);
+}
+
+.orc-live-trouble {
+  color: var(--destructive);
+}
+
+.orc-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: var(--success);
+}
+
+.orc-live-dot-disconnected {
+  background: var(--destructive);
+}
+
+.orc-live-dot-checking {
+  background: var(--muted-foreground);
+}
+
+/* ------------------------------------------------------- live box */
+
+/* A terminal pane: dark in both themes, so its colours are fixed. */
+.orc-term {
+  background: #0d1117;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+}
+
+.orc-term-head {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  color: #e6edf3;
+}
+
+.orc-term .orc-live-waiting {
+  color: #d29922;
+}
+
+.orc-term .orc-live-trouble {
+  color: #f85149;
+}
+
+.orc-term-command {
+  color: #e6edf3;
+  font-weight: 600;
+}
+
+.orc-term-read,
+.orc-term-tool,
+.orc-term-other {
+  color: #79c0ff;
+}
+
+.orc-term-edit {
+  color: #7ee787;
+}
+
+.orc-term-message {
+  color: #c9d1d9;
+}
+
+.orc-term-dim {
+  color: #8b949e;
+  font-weight: 400;
+}
+
+/* A command still running: a cursor after it. */
+.orc-term-running {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.4em;
+  vertical-align: text-bottom;
+  background: #7ee787;
+  animation: orc-breathe 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orc-term-running {
+    animation: none;
+  }
+  .orc-spinner {
+    animation: none;
+    border-color: var(--success);
+  }
+  .orc-progress::after {
+    animation: none;
+    width: 100%;
+  }
+  .orc-dots > span {
+    animation: none;
+    opacity: 1;
+  }
+  .orc-pr-running {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------- board tabs */
+
+.orc-tabs {
+  /* Room inside the scroller for the badges that overhang each tab. */
+  padding: 9px 10px 4px 0;
+}
+
+.orc-tab-badges {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  display: flex;
+  gap: 2px;
+  pointer-events: none;
+}
+
+/* iOS notification badges: a filled circle, a pill past one digit. */
+.orc-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 1.5px var(--background);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.orc-badge-needs {
+  background: #ff9500;
+}
+
+.orc-badge-working {
+  background: #34c759;
+}
+
+/* A stage cell that opens its own thread (researcher, builder). */
+.orc-cell-link {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orc-cell-link:hover > span:last-child {
+  text-decoration: underline;
+}
+
+/* ------------------------------------------------------ sidebar list */
+
+.orc-side-badges {
+  display: flex;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.orc-side-badges .orc-badge {
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  font-size: 10px;
+  box-shadow: none;
+}
+
+/* The setup wizard: the repo list scrolls, the dialog does not grow past the window. */
+.orc-setup {
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.orc-setup-repos {
+  max-height: 14rem;
+}
