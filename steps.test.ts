@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   STEP_MAX,
   STEPS_MAX,
+  buildWaitsForReload,
   keepOpenAfterLand,
   parseMore,
   parseSteps,
@@ -94,6 +95,31 @@ describe("keepOpenAfterLand", () => {
     expect(keepOpenAfterLand(null)).toBe(false);
     expect(keepOpenAfterLand(parseMore("none"))).toBe(false);
     expect(keepOpenAfterLand(parseMore(undefined))).toBe(false);
+  });
+});
+
+describe("buildWaitsForReload", () => {
+  it("lets a build through only when no land is running and no reload is pending", () => {
+    expect(buildWaitsForReload({ landing: false, reloadPending: false })).toBeNull();
+  });
+
+  it("refuses while the last land's reload is not confirmed", () => {
+    expect(buildWaitsForReload({ landing: false, reloadPending: true })).toBe(
+      'The last land\'s reload is not confirmed yet, so nothing was claimed or started. You will be told when it is live ("Reloaded: … is live"), or that it failed; call build again then.',
+    );
+  });
+
+  it("refuses while the land itself is still running, with or without a pending reload", () => {
+    const running =
+      'The last land is still running, so nothing was claimed or started. You will be told when it is live ("Reloaded: … is live"), or that it failed; call build again then.';
+    expect(buildWaitsForReload({ landing: true, reloadPending: false })).toBe(running);
+    expect(buildWaitsForReload({ landing: true, reloadPending: true })).toBe(running);
+  });
+
+  it("names the message the thread will get", () => {
+    const told = stepLandedMessage("task_a", "74c3110aaaabbbb", ["docs"]);
+    expect(told).toContain("Reloaded: 74c3110 is live");
+    expect(buildWaitsForReload({ landing: false, reloadPending: true })).toContain("Reloaded: … is live");
   });
 });
 

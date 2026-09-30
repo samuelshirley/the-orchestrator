@@ -208,6 +208,7 @@ import { JEV_TIMEOUT_MS, agreementReport, askRecord, failedAsk, shouldCall, type
 import { deriveTestList, howToOpenGap, validatePr } from "./validation.js";
 import { flag, text as textArg } from "./toolargs.js";
 import {
+  buildWaitsForReload,
   keepOpenAfterLand,
   parseMore,
   parseSteps,
@@ -2008,11 +2009,22 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
+   * Why a build or claimOnly waits: the task's last land is running or its
+   * reload is not confirmed, and that confirmation releases the task's claims
+   * and resets its build (keepOpenAfterStep). Null when nothing is pending.
+   */
+  function waitsForReload(task: Task): string | null {
+    return buildWaitsForReload({ landing: landing.has(task.id), reloadPending: store.getMeta(reloadKey(task.id)) !== null });
+  }
+
+  /**
    * build(claimOnly): replace the task's claims with these touches, checked
    * against other tasks' claims exactly as a build is. In any build state and
    * past every gate: it starts nothing. Throws with the reason when refused.
    */
   async function claimOnlyFor(task: Task, touches: readonly string[]): Promise<string> {
+    const waits = waitsForReload(task);
+    if (waits !== null) throw new Error(waits);
     const project = await projectById(task.projectId);
     const profile = profileOf(project);
     const config = configRefusal(profile);
@@ -2045,6 +2057,8 @@ export default async function plugin(bb: BbPluginApi) {
    * failed reuses that worktree and branch instead of orphaning them.
    */
   async function startBuild(task: Task, request: BuildRequest, requestedBy: string, bySam = false): Promise<string> {
+    const waits = waitsForReload(task);
+    if (waits !== null) throw new Error(waits);
     const project = await projectById(task.projectId);
     const profile = profileOf(project);
     const config = configRefusal(profile);

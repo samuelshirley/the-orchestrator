@@ -234,7 +234,9 @@ left, one step per line (`steps.ts`). The steps and the landed commit are
 recorded in meta (`steps_left:<id>`) when it lands, and once the reload is live
 the task is not closed: its claims and build slot go back, it returns to the
 first column as "Step landed, N left", and its thread is told to carry on and
-call build again for the next step. Neither the landed check nor a `Done:`
+call build again for the next step. Until then build and build `claimOnly`
+refuse for that task, claiming nothing: a build started between the land and
+its confirmed reload would have its claims released under it. Neither the landed check nor a `Done:`
 report closes a task with steps left. The final land omits `more` and closes
 it as usual; `release_task` with close, deleting or archiving it close it too,
 and every close drops the record. A failed build or reload keeps it. No

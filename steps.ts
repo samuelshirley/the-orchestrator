@@ -99,6 +99,18 @@ export function stepKeptReply(taskId: string, left: number): string {
   return `${taskId} stays open with ${left} step${left === 1 ? "" : "s"} left: build again for the next one.`;
 }
 
+/**
+ * Why build (and build claimOnly) waits, or null. Between a land and its
+ * confirmed reload the task's claims and build state are still the landed
+ * step's: the confirmation releases and resets them, so a build started in
+ * that gap would lose its claims under a running builder.
+ */
+export function buildWaitsForReload(state: { landing: boolean; reloadPending: boolean }): string | null {
+  if (!state.landing && !state.reloadPending) return null;
+  const what = state.landing ? "The last land is still running" : "The last land's reload is not confirmed yet";
+  return `${what}, so nothing was claimed or started. You will be told when it is live ("Reloaded: … is live"), or that it failed; call build again then.`;
+}
+
 /** The release recorded when a step landed and the task stays open. */
 export function stepReleaseReason(sha: string, left: number): string {
   return `Step landed at ${sha.slice(0, 7)}; kept open with ${left} step${left === 1 ? "" : "s"} left.`;
