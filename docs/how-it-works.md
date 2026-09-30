@@ -384,9 +384,15 @@ use; on-device SFSpeechRecognizer before that). It needs Homebrew ffmpeg
 helper is compiled on first use into `~/Library/Caches/the-orchestrator/voice/`.
 
 ```
-bb-app config set BB_TRANSCRIPTION local/apple            # on-device
-bb-app config set BB_TRANSCRIPTION codex/gpt-transcribe   # back to Codex/OpenAI
+bb settings ai-services set voice local       # on-device
+bb settings ai-services set voice automatic   # back to Codex/OpenAI
+bb settings ai-services show                  # what is chosen, and which services are ready
 ```
+
+Automatic never picks the on-device service, so it has to be chosen. If the
+mic attaches the recording as an audio file instead of text, no voice service
+is ready: run `show`, and set voice back to `local` (an app update that resets
+the choice does this).
 
 If macOS asks, allow "The Orchestrator Transcriber" under System Settings →
 Privacy & Security → Speech Recognition.

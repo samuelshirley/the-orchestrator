@@ -1268,7 +1268,7 @@ export default experimental_defineHostEntry({
     "ai.inference.complete": () => ({
       ok: false as const,
       code: "request_failed" as const,
-      message: "The Orchestrator's local service only transcribes voice; choose another BB_INFERENCE.",
+      message: "The Orchestrator's local service only transcribes voice; choose another service in Settings → AI services.",
     }),
 
     repoSnapshot: async ({ repoPath, previewMarker }, context): Promise<RepoSnapshot> => {
