@@ -22,6 +22,7 @@ const PINNED = [
   "74450a391df7e688575feff6ad87bbc7be33704a8156fefa3b08f5b73d2371b3", // 13 withdrawals
   "02089522acb15463c183179e0c622b51c8110ca2a18c01165cd04cf64ba31676", // 14 jev_watch
   "0a3a9a2b73905e40ba8384d370280886f25cd18d033df563925ce963b8da9e85", // 15 jev_watch index
+  "c4d89e7f19acac46b600537e2998ff8254db6fd29384473e445dd0f94e190589", // 16 model_routes
 ];
 
 const sha256 = (statement: string) => createHash("sha256").update(statement).digest("hex");

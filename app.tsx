@@ -38,6 +38,8 @@ import type { PullRequest } from "./contract";
 import { usageLabel, usageWarning } from "./usage";
 import { SIGN_IN_BUTTON, signInPopup, signInPopupOpen, signedOutItem } from "./signin";
 import { reportDetail, reportLine } from "./jevwatch";
+import { SONNET_THRESHOLD, routeLabel, routeTooltip, routingLine } from "./modelroute";
+import { keyProblemText } from "./typesafe";
 import {
   BUILD_CAP,
   PALETTE,
@@ -526,6 +528,50 @@ function JevWatchLine({ entry }: { entry: BoardState["jevWatch"][number] | undef
   return (
     <div className="border-b border-border px-3 py-2">
       <p className="text-xs text-muted-foreground" title={reportDetail(entry.report)}>
+        {line}
+      </p>
+    </div>
+  );
+}
+
+type RouteView = BoardState["modelRoutes"][number];
+
+/** How a thread's model was picked (modelroute.ts): "Sonnet · Jev 0.86" or "Default model", the reason in its tooltip. */
+function RouteMark({ route }: { route: RouteView | undefined }) {
+  if (route === undefined) return null;
+  return (
+    <span
+      className="orc-route truncate text-[11px] text-muted-foreground"
+      title={routeTooltip({ reason: route.reason, probability: route.probability, jevModel: route.answeredBy })}
+    >
+      {routeLabel(route)}
+    </span>
+  );
+}
+
+/** Jev's model routing for this project: agents on Sonnet in the last 7 days, or why there is none. Hidden while the host cannot say. */
+function ModelRoutingLine({
+  routes,
+  projectId,
+  routeKey,
+}: {
+  routes: readonly RouteView[];
+  projectId: string | null;
+  routeKey: BoardState["modelRouteKey"];
+}) {
+  const now = useNow(60_000);
+  if (routeKey === null || projectId === null) return null;
+  const line = routingLine(
+    routes.filter((route) => route.projectId === projectId),
+    now,
+    routeKey,
+  );
+  const detail = routeKey.present
+    ? `Jev picks Sonnet for a task, research or build agent when it is at least ${SONNET_THRESHOLD} sure; anything else keeps the provider default. Patches always does.`
+    : keyProblemText(routeKey.problem);
+  return (
+    <div className="border-b border-border px-3 py-2">
+      <p className="text-xs text-muted-foreground" title={detail}>
         {line}
       </p>
     </div>
@@ -1866,12 +1912,15 @@ const TaskRowView = memo(function TaskRowView({
   onDelete,
   rpc,
   reload,
+  routes,
 }: {
   row: TaskRow;
   indicator: Indicator;
   project: string;
   color: string;
   focus: ReadonlyMap<string, string>;
+  /** Each thread's model route (modelroute.ts), by thread id. */
+  routes: ReadonlyMap<string, RouteView>;
   selected: boolean;
   onSelect: (threadId: string) => void;
   onDelete: (task: DeletableTask) => void;
@@ -1904,6 +1953,7 @@ const TaskRowView = memo(function TaskRowView({
             {project}
             {task.note ? ` · ${task.note}` : ""}
           </span>
+          <RouteMark route={task.threadId === null ? undefined : routes.get(task.threadId)} />
           {task.worktreePath !== null ? (
             <span className="truncate font-mono text-[11px] text-muted-foreground" title={task.worktreePath}>
               {formatHomePathForDisplay(task.worktreePath)}
@@ -1918,11 +1968,15 @@ const TaskRowView = memo(function TaskRowView({
         </div>
       </td>
       <td className="orc-td">
-        <StageCell cell={row.research} focus={focus} onSelect={onSelect} />
+        <div className="flex min-w-0 flex-col gap-1">
+          <StageCell cell={row.research} focus={focus} onSelect={onSelect} />
+          <RouteMark route={row.research.threadId === null ? undefined : routes.get(row.research.threadId)} />
+        </div>
       </td>
       <td className="orc-td">
         <div className="flex min-w-0 flex-col gap-1">
           <StageCell cell={row.build} focus={focus} onSelect={onSelect} />
+          <RouteMark route={row.build.threadId === null ? undefined : routes.get(row.build.threadId)} />
           {task.buildState === "failed" ? <BuildFailedActions taskId={task.id} rpc={rpc} reload={reload} /> : null}
         </div>
       </td>
@@ -2890,6 +2944,10 @@ function BoardPage({ subPath }: PluginNavPanelProps) {
 
   const workingIds = threads.filter(isWorking).map((thread) => thread.id);
   const focus = useWorkingFocus(workingIds);
+  const routes = useMemo(
+    () => new Map((state?.modelRoutes ?? EMPTY).map((route) => [route.threadId, route] as const)),
+    [state?.modelRoutes],
+  );
   const otherInputs = useOtherInputs(state, liveness);
   const [otherAgentsOpen, setOtherAgentsOpen] = useOtherAgentsOpen(rpc, state?.ui.otherAgentsOpen ?? null);
 
@@ -3159,6 +3217,7 @@ function BoardPage({ subPath }: PluginNavPanelProps) {
                           project={projectName(row.task.projectId)}
                           color={colors.get(row.task.projectId) ?? PALETTE[0].value}
                           focus={focus}
+                          routes={routes}
                           selected={row.task.id === scopedTask?.id}
                           onSelect={select}
                           onDelete={deleteTask}
@@ -3181,6 +3240,7 @@ function BoardPage({ subPath }: PluginNavPanelProps) {
           {projectSections ? (
             <>
               <JevWatchLine entry={(state.jevWatch ?? []).find((entry) => entry.projectId === boardProjectId)} />
+              <ModelRoutingLine routes={state.modelRoutes ?? EMPTY} projectId={boardProjectId} routeKey={state.modelRouteKey ?? null} />
               <OtherAgents
                 view={others}
                 savedOpen={otherAgentsOpen}

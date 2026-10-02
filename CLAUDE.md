@@ -119,10 +119,16 @@ what must not break.
   at most 3 tabs of its own, released when its pass ends. Builders: no browser.
 - `memwatch.sh` is the backstop outside bb: it kills the largest process in
   bb's tree before the Mac runs out, and logs to `.memwatch/`.
-- Jev is watch-only (`jevwatch.ts`): asked in the background with a 2 s cap,
-  logged next to what happened, never changes behaviour; steering is a later
-  rung the owner turns on. Jev is paused in this repo: nothing installed, nothing
-  rented, and the code is dormant without `~/.config/jev/*`. `jev up` never
+- Jev steers one thing: the model of task, research and build agents
+  (`modelroute.ts`), through TypeSafe with the key in
+  `~/.config/the-orchestrator/jev.env` (`typesafe.ts`; only host.ts reads it,
+  refused if others can read the file). Sonnet only when Jev says sonnet at
+  0.7 or more; anything else, or any failure, passes no model (the provider
+  default). Patches never; the owner's composer pick wins. What is sent is
+  scrubbed first. Its kind/tier questions stay watch-only (`jevwatch.ts`):
+  asked in the background with a 2 s cap, logged next to what happened, never
+  change behaviour. The box is paused in this repo: nothing installed, nothing
+  rented, and that code is dormant without `~/.config/jev/*`. `jev up` never
   runs without the owner's ok; $20 cap (`jev/policy.ts`).
 - Overlapping `touches` refuse a build; the paths held whole come from each
   profile's `sharedPaths` (`claims.ts`, `profiles.ts`). open_pr,

@@ -527,10 +527,49 @@ worktree (`npx vitest run`, host `runGuardTests`) after the claims check.
 A missing test change or a failing run refuses the land; nothing lands. A
 guard changes with its tests: mutation-check them.
 
-## Jev (watch only)
+## Jev (model routing, and watch only)
 
 Jev is a typed-decision model: asked a question with fixed answers, it gives a
-label and a probability for each. "Jev before Opus" is the first rung: for
+label and a probability for each. It steers one thing, the model of each
+agent; everything else it answers is watched only.
+
+### Model routing
+
+Before The Orchestrator starts a task, research or build thread, it asks
+Jev one question: does this agent need Sonnet or Opus? (`modelroute.ts`)
+
+- **The gate.** Sonnet (`claude-sonnet-5-5`) only when Jev answers sonnet
+  with a probability of 0.7 or more (`SONNET_THRESHOLD`). Opus, a lower
+  probability, no key, a timeout, an error or the back-off all pass no model:
+  the thread starts on the provider default, exactly as before. Jev never
+  gets a model it did not choose.
+- **Who.** Task threads (title and brief), research threads (task title and
+  question) and builders (task title and build instructions). Never Patches:
+  her chats keep the provider default. A model the owner picks in the
+  composer always wins. Only on the Claude Code provider.
+- **Never in the way.** One request to TypeSafe, capped at 2 s, no retry.
+  After a timeout or an error, nothing is asked for 5 minutes. A failure
+  never stops a spawn.
+- **The key.** `JEV_API_KEY=...` in `~/.config/the-orchestrator/jev.env`,
+  outside every repo. Only the host reads it, at most once a minute, so a new
+  key works without a reload. A file group or others can read is refused:
+  `chmod 600` it. The key goes only in the Authorization header to
+  `https://api.typesafe.ai`; it is never logged, stored or shown.
+- **What leaves the Mac.** Task titles, briefs, research questions and build
+  instructions of every project go to TypeSafe in the US. Sam decided this on
+  2 Oct 2026. They are scrubbed first: emails, tokens and keys, `KEY=value`
+  settings, database and other credentialed URLs, signed URLs and phone
+  numbers become `<email>`, `<secret>`, `<value>`, `<db-url>`, `<url>` and
+  `<phone>`. Then the text is cut to 4,000 characters.
+- **What is kept.** One row per thread (`model_routes`): the model passed or
+  none, the reason, Jev's probability and version. Each task, research and
+  build cell on the board shows "Sonnet · Jev 0.86" or "Default model", with
+  the reason on hover. One line under the board says "Jev model routing: N of
+  M agents on Sonnet" for the last 7 days, or "no key".
+
+### Watch only
+
+"Jev before Opus" is the first rung: for
 each new task, The Orchestrator asks Jev two questions in the background, what
 **kind** of task it is (research or build) and what **tier** (small, medium,
 large). The answer goes in the dossier (`jev_watch`). When the task closes,
@@ -541,10 +580,10 @@ for example "Jev (watch only): kind 10/12 agree · tier 7/10 · 1 risky miss · 
 errors". Hover it for the confusion table and latency. The line is hidden
 until the project has a row.
 
-- **Watch only.** Nothing Jev answers changes what The Orchestrator does. The
-  only uses of an answer in `server.ts` are storing it and the board report,
-  and `jevwatch.test.ts` fails if that changes. Steering is a later rung that
-  the owner turns on.
+- **Watch only.** Nothing Jev answers about kind and tier changes what The
+  Orchestrator does. The only uses of those answers in `server.ts` are storing
+  them and the board report, and `jevwatch.test.ts` fails if that changes. The
+  model route is the one rung the owner has turned on.
 - **Never in the way.** The ask is fire-and-forget: it is never awaited when a
   task is created. It is capped at 2 s, body included (`JEV_TIMEOUT_MS`).
   After a failure, nothing is asked for 5 minutes. The host reads
@@ -591,6 +630,8 @@ until the project has a row.
 | `setupwizard.ts` | The setup wizard: when it opens, which folder is allowed, which repos can be ticked, the config file's new text, what a sign-in check means |
 | `newproject.ts` | Add project: slug, name checks, first files, the private `gh repo create`, the visibility check |
 | `worktrees.ts` | Worktree naming, `.worktreeinclude`, cleanup rule, half-removed worktrees, the cleanup sweep |
+| `modelroute.ts` | Jev's model routing: the question, the scrub, the 0.7 gate, who is routed, the board's label and line |
+| `typesafe.ts` | TypeSafe's URL and model, reading `JEV_API_KEY` from `jev.env`, refusing a file others can read |
 | `jevwatch.ts` | Jev, watch only: the two questions, reading an answer, the host's bounded ask, the actual outcome, the agreement report |
 | `jev/` | The Jev box: `cli.ts` (up, down, status, dry-run), `policy.ts` (cap, watchdog, Verda bodies, ledger), `box/` (setup, Caddy, watchdog, AnyJev shim) |
 | `builderguard.ts` | The builder guard: the Bash hook's command policy and the worktree's sandbox settings; node runs it directly |

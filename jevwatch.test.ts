@@ -406,6 +406,8 @@ describe("server.ts only watches", () => {
       /^bb\.log\.info\(`\$\{task\.id\}: Jev watch skipped \(\$\{describeError\(error\)\}\)\.`\);$/,
       /^jevWatch: own$/,
       /^\.map\(\(project\) => \(\{ projectId: project\.id, report: agreementReport\(store\.listJevWatch\(project\.id\)\) \}\)\)$/,
+      // The model route's own record (modelroute.ts): which Jev version picked a model, shown on the board.
+      /^answeredBy: route\.jevModel,$/,
     ];
     const jevLines = code.filter((line) => /jev|askRecord|failedAsk|agreementReport|shouldCall/i.test(line));
     expect(jevLines.filter((line) => !allowed.some((pattern) => pattern.test(line)))).toEqual([]);
@@ -429,5 +431,36 @@ describe("server.ts only watches", () => {
       "if (failedAsk(record)) jevFailedAt = askedAt;",
       "store.recordJevAsk({ taskId: task.id, projectId: task.projectId, askedAt, ...record });",
     ]);
+  });
+});
+
+describe("the one thing Jev steers is the model (modelroute.ts)", () => {
+  const server = readFileSync(join(here, "server.ts"), "utf8");
+  const block = (start: string, end: string) => {
+    const from = server.indexOf(start);
+    expect(from).toBeGreaterThan(-1);
+    return server.slice(from, server.indexOf(end, from));
+  };
+
+  it("passes a model to spawn only through spawnModel, for task, research and build", () => {
+    const uses = server.match(/\.\.\.spawnModel\("(\w+)", route\)/g) ?? [];
+    expect(uses.sort()).toEqual([
+      '...spawnModel("build", route)',
+      '...spawnModel("research", route)',
+      '...spawnModel("task", route)',
+      '...spawnModel("task", route)',
+    ]);
+  });
+
+  it("never routes a Patches chat", () => {
+    const chat = block("async function ensureChat(", "startingChats.set(");
+    expect(chat).toContain("providerId: PATCHES_PROVIDER");
+    expect(chat).not.toMatch(/spawnModel|routeFor|\bmodel\b/);
+  });
+
+  it("routes without the watch-only answers", () => {
+    const route = block("async function routeFor(", "\n  }\n");
+    expect(route).not.toMatch(/jevAsk|askRecord|listJevWatch|jevKind|jevTier|agreementReport/);
+    expect(route).toContain('host.call("modelRoute"');
   });
 });

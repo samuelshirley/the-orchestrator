@@ -390,6 +390,32 @@ export const hostContract = defineRpcContract({
       z.object({ ok: z.literal(false), kind: z.enum(["error", "timeout"]), error: text(300), latencyMs: z.number().int().min(0) }),
     ]),
   },
+  /**
+   * Jev picks an agent's model (modelroute.ts): TypeSafe only, with the key
+   * from ~/.config/the-orchestrator/jev.env (typesafe.ts), "no-key" with no
+   * call when there is none or the file is open to others. One POST capped
+   * at JEV_TIMEOUT_MS, no retry. Every outcome is a value, never a throw, and
+   * no error carries the response body or the key. `state` comes scrubbed
+   * from the server (modelroute.ts routeState).
+   */
+  modelRoute: {
+    input: z.object({ state: z.string().min(1).max(4000) }).strict(),
+    output: z.union([
+      z.object({ ok: z.literal(true), latencyMs: z.number().int().min(0), model: text(80).nullable(), answer: jevAnswerSchema }).strict(),
+      z.object({ ok: z.literal(false), kind: z.literal("no-key"), problem: z.enum(["missing", "open"]) }).strict(),
+      z
+        .object({ ok: z.literal(false), kind: z.enum(["error", "timeout"]), error: text(300), latencyMs: z.number().int().min(0) })
+        .strict(),
+    ]),
+  },
+  /** Whether jev.env holds a usable key (typesafe.ts keyFromFile). Presence only: the key never leaves the host. */
+  routeKeyStatus: {
+    input: z.object({}).strict(),
+    output: z.union([
+      z.object({ present: z.literal(true) }).strict(),
+      z.object({ present: z.literal(false), problem: z.enum(["missing", "open"]) }).strict(),
+    ]),
+  },
   /** Kill every process whose cwd is inside a task worktree (a stopped builder's leftovers). */
   killWorktreeProcesses: {
     input: z.object({ repoPath: path, worktreePath: path }).strict(),

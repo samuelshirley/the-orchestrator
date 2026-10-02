@@ -5,6 +5,7 @@
 // and its insert cannot interleave with another tool call.
 import { askLine, type Ask } from "./attention";
 import { actualOutcome, type JevAskRecord, type JevWatchRow, type OutcomeFacts } from "./jevwatch";
+import type { RouteRecord } from "./modelroute";
 import { reportKey } from "./landed";
 import type { Claim } from "./claims";
 
@@ -123,7 +124,32 @@ export const MIGRATIONS: readonly string[] = [
      actual_at INTEGER
    )`,
   `CREATE INDEX IF NOT EXISTS jev_watch_task ON jev_watch (task_id)`,
+  `CREATE TABLE IF NOT EXISTS model_routes (
+     thread_id TEXT PRIMARY KEY,
+     task_id TEXT NOT NULL,
+     project_id TEXT NOT NULL,
+     role TEXT NOT NULL,
+     routed_at INTEGER NOT NULL,
+     model TEXT,
+     reason TEXT NOT NULL,
+     probability REAL,
+     jev_model TEXT,
+     error TEXT
+   )`,
 ];
+
+export interface ModelRoute {
+  threadId: string;
+  taskId: string;
+  projectId: string;
+  role: string;
+  routedAt: number;
+  model: string | null;
+  reason: string;
+  probability: number | null;
+  jevModel: string | null;
+  error: string | null;
+}
 
 export type Stage = "research" | "build" | "pr" | "you" | "done";
 export const STAGES: readonly Stage[] = ["research", "build", "pr", "you", "done"];
@@ -765,6 +791,40 @@ export class Store {
       actualKind: str(row.actual_kind),
       actualTier: str(row.actual_tier),
       actualAt: num(row.actual_at),
+    }));
+  }
+
+  // ------------------------------------------------------------ model routes
+  /** How one agent's model was picked (modelroute.ts): one row per thread. */
+  recordModelRoute(row: { threadId: string; taskId: string; projectId: string; role: string; routedAt: number } & RouteRecord) {
+    this.db
+      .prepare(
+        `INSERT INTO model_routes (thread_id, task_id, project_id, role, routed_at, model, reason, probability, jev_model, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (thread_id) DO UPDATE SET routed_at = excluded.routed_at, model = excluded.model, reason = excluded.reason,
+           probability = excluded.probability, jev_model = excluded.jev_model, error = excluded.error`,
+      )
+      .run(row.threadId, row.taskId, row.projectId, row.role, row.routedAt, row.model, row.reason, row.probability, row.jevModel, row.error);
+  }
+
+  /** Every recorded route, or those since `since`; newest last. */
+  modelRoutes(since?: number): ModelRoute[] {
+    const rows = (
+      since === undefined
+        ? this.db.prepare("SELECT * FROM model_routes ORDER BY routed_at").all()
+        : this.db.prepare("SELECT * FROM model_routes WHERE routed_at >= ? ORDER BY routed_at").all(since)
+    ) as Row[];
+    return rows.map((row) => ({
+      threadId: String(row.thread_id),
+      taskId: String(row.task_id),
+      projectId: String(row.project_id),
+      role: String(row.role),
+      routedAt: num(row.routed_at) ?? 0,
+      model: str(row.model),
+      reason: String(row.reason),
+      probability: num(row.probability),
+      jevModel: str(row.jev_model),
+      error: str(row.error),
     }));
   }
 

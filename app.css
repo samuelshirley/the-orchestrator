@@ -175,6 +175,14 @@
   color: var(--foreground);
 }
 
+/* How a thread's model was picked (modelroute.ts): small and muted, under its cell. */
+.orc-route {
+  display: block;
+  min-width: 0;
+  line-height: 1.2;
+  cursor: default;
+}
+
 .orc-cell-done {
   color: var(--foreground);
 }

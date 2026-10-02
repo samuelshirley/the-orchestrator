@@ -398,4 +398,49 @@ describe("browser lease", () => {
       expect(store.task(task.id)?.closedAt).not.toBeNull();
     });
   });
+
+  describe("model routes", () => {
+    const record = { model: "claude-sonnet-5-5", reason: "sonnet", probability: 0.86, jevModel: "jev-1.13.0", error: null } as const;
+
+    it("records one row per thread and reads it back", () => {
+      const store = fresh();
+      store.recordModelRoute({ threadId: "thr_a", taskId: "task_1", projectId: "p", role: "build", routedAt: 10, ...record });
+      store.recordModelRoute({
+        threadId: "thr_b",
+        taskId: "task_1",
+        projectId: "p",
+        role: "research",
+        routedAt: 20,
+        model: null,
+        reason: "timeout",
+        probability: null,
+        jevModel: null,
+        error: "no answer in 2000 ms",
+      });
+      expect(store.modelRoutes()).toEqual([
+        { threadId: "thr_a", taskId: "task_1", projectId: "p", role: "build", routedAt: 10, ...record },
+        {
+          threadId: "thr_b",
+          taskId: "task_1",
+          projectId: "p",
+          role: "research",
+          routedAt: 20,
+          model: null,
+          reason: "timeout",
+          probability: null,
+          jevModel: null,
+          error: "no answer in 2000 ms",
+        },
+      ]);
+      expect(store.modelRoutes(15).map((row) => row.threadId)).toEqual(["thr_b"]);
+    });
+
+    it("a second record for the same thread replaces the first", () => {
+      const store = fresh();
+      store.recordModelRoute({ threadId: "thr_a", taskId: "task_1", projectId: "p", role: "task", routedAt: 10, ...record });
+      store.recordModelRoute({ threadId: "thr_a", taskId: "task_1", projectId: "p", role: "task", routedAt: 11, ...record, model: null, reason: "opus" });
+      expect(store.modelRoutes()).toHaveLength(1);
+      expect(store.modelRoutes()[0]).toMatchObject({ model: null, reason: "opus", routedAt: 11 });
+    });
+  });
 });

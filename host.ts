@@ -81,6 +81,8 @@ import {
   type Visibility,
 } from "./newproject.js";
 import { askJev, downGate } from "./jevwatch.js";
+import { askRoute } from "./modelroute.js";
+import { JEV_KEY_PATH, KEY_FILE_MAX_CHARS, keyFromFile, keyStale, type KeyState } from "./typesafe.js";
 import { LOCAL_CONFIG_LAST_GOOD, LOCAL_CONFIG_MAX_CHARS, LOCAL_CONFIG_PATH, parseLocalConfig } from "./localconfig.js";
 import { githubSlug } from "./profiles.js";
 import {
@@ -343,6 +345,36 @@ async function jevAskOnce(title: string, brief: string, signal: AbortSignal) {
     return { ok: false as const, kind: "off" as const };
   }
   return reply;
+}
+
+/** jev.env as last read, and when: re-read at most once a minute (typesafe.ts keyStale). */
+let jevKey: { at: number; state: KeyState } | null = null;
+
+/**
+ * The TypeSafe key from ~/.config/the-orchestrator/jev.env (typesafe.ts).
+ * Its text and mode go to keyFromFile, which refuses a file others can read.
+ * The key is never logged, never put in an error, never returned to the server.
+ */
+async function readJevKey(): Promise<KeyState> {
+  const now = Date.now();
+  if (jevKey !== null && !keyStale(now, jevKey.at)) return jevKey.state;
+  const file = join(homedir(), ...JEV_KEY_PATH);
+  let state: KeyState;
+  try {
+    const info = await stat(file);
+    state = info.isFile()
+      ? keyFromFile({ text: (await readFile(file, "utf8")).slice(0, KEY_FILE_MAX_CHARS), mode: info.mode })
+      : { ok: false, problem: "missing" };
+  } catch {
+    state = { ok: false, problem: "missing" };
+  }
+  jevKey = { at: now, state };
+  return state;
+}
+
+/** Jev picks an agent's model (modelroute.ts): TypeSafe only, one POST, never the local server or the box. */
+async function modelRouteOnce(state: string, signal: AbortSignal) {
+  return askRoute({ key: await readJevKey(), fetch: (url, init) => fetch(url, init), now: () => Date.now() }, state, signal);
 }
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -1660,6 +1692,13 @@ export default experimental_defineHostEntry({
     summarizeTitle: async ({ prompt, model }, { signal }) => claudeOnce(prompt, model, signal),
 
     jevAsk: async ({ title, brief }, { signal }) => jevAskOnce(title, brief, signal),
+
+    modelRoute: async ({ state }, { signal }) => modelRouteOnce(state, signal),
+
+    routeKeyStatus: async () => {
+      const key = await readJevKey();
+      return key.ok ? { present: true as const } : { present: false as const, problem: key.problem };
+    },
 
     killProcess: async (input, { signal }) => {
       const result = await killAgentProcess(input, signal);

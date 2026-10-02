@@ -205,6 +205,20 @@ import { UI_OTHER_AGENTS_OPEN_KEY, closedTaskThreadIds, looseCandidates, savedFl
 import { VOICE_DISPLAY_NAME, VOICE_MODEL, VOICE_SERVICE_ID, VOICE_TIMEOUT_MS } from "./voice.js";
 import { MIGRATIONS, Store, type BuildRequest, type SqlDb, type Task } from "./store.js";
 import { JEV_TIMEOUT_MS, agreementReport, askRecord, failedAsk, shouldCall, type JevAskReply } from "./jevwatch.js";
+import {
+  ROUTE_TIMEOUT_MS,
+  ROUTE_WINDOW_MS,
+  ownerPickedModel,
+  routeBackoff,
+  routeDecision,
+  routeFailed,
+  routeSkip,
+  routeState,
+  skippedRoute,
+  spawnModel,
+  type RouteRecord,
+  type RouteRole,
+} from "./modelroute.js";
 import { deriveTestList, howToOpenGap, validatePr } from "./validation.js";
 import { flag, text as textArg } from "./toolargs.js";
 import {
@@ -428,6 +442,23 @@ export const boardStateSchema = z.object({
   ui: z.object({ otherAgentsOpen: z.boolean().nullable() }),
   /** Jev's watch-only agreement per project (jevwatch.ts); a project with no rows is absent. */
   jevWatch: z.array(z.object({ projectId: z.string(), report: jevReportSchema })),
+  /** How each agent's model was picked (modelroute.ts): the last 7 days and every open task's threads. */
+  modelRoutes: z.array(
+    z.object({
+      threadId: z.string(),
+      projectId: z.string(),
+      routedAt: z.number(),
+      model: z.string().nullable(),
+      reason: z.string(),
+      probability: z.number().nullable(),
+      /** The Jev version that answered. */
+      answeredBy: z.string().nullable(),
+    }),
+  ),
+  /** Whether the host has a usable TypeSafe key (presence only, typesafe.ts); null when it cannot say. */
+  modelRouteKey: z
+    .union([z.object({ present: z.literal(true) }), z.object({ present: z.literal(false), problem: z.enum(["missing", "open"]) })])
+    .nullable(),
   /** Claude is signed out (signin.ts signedOutView): the one Needs you item; null when signed in. */
   signedOut: z.object({ since: z.number(), waiting: z.number(), latest: z.number(), command: z.string() }).nullable(),
 });
@@ -1832,15 +1863,24 @@ export default async function plugin(bb: BbPluginApi) {
     let task = store.createTask({ projectId: project.id, title, brief });
     void jevWatchTask(task, sourceOf(project)?.hostId ?? null);
     if (pr !== null) task = store.updateTask(task.id, { prNumber: pr.number, prUrl: pr.url });
+    const provider = await providerOf(parentThreadId);
+    const route = await routeFor({
+      role: "task",
+      providerId: provider.providerId,
+      hostId: sourceOf(project)?.hostId ?? null,
+      state: () => routeState({ role: "task", title, brief }),
+    });
     const thread = await bb.sdk.threads.spawn({
       projectId: project.id,
       parentThreadId,
       environment: await checkoutEnvironment(project),
-      ...(await providerOf(parentThreadId)),
+      ...provider,
+      ...spawnModel("task", route),
       title,
       prompt: taskPrompt(task, project.name),
       pluginMetadata: { role: "task", taskId: task.id },
     });
+    noteRoute(thread.id, task, "task", route);
     const saved = store.updateTask(task.id, { threadId: thread.id });
     changed(saved);
     return { task: saved, threadId: thread.id };
@@ -1897,15 +1937,24 @@ export default async function plugin(bb: BbPluginApi) {
         if (paused !== null) return fail(paused);
         const label = question.length > 60 ? `${question.slice(0, 59)}…` : question;
         const project = await projectById(task.projectId);
+        const provider = await providerOf(task.threadId);
+        const route = await routeFor({
+          role: "research",
+          providerId: provider.providerId,
+          hostId: sourceOf(project)?.hostId ?? null,
+          state: () => routeState({ role: "research", taskTitle: task.title, question }),
+        });
         const thread = await bb.sdk.threads.spawn({
           projectId: task.projectId,
           parentThreadId: task.threadId,
           environment: await checkoutEnvironment(project),
-          ...(await providerOf(task.threadId)),
+          ...provider,
+          ...spawnModel("research", route),
           title: `Research: ${label}`,
           prompt: researchPrompt(question),
           pluginMetadata: { role: "research", taskId: task.id },
         });
+        noteRoute(thread.id, task, "research", route);
         store.addChild({ threadId: thread.id, taskId: task.id, kind: "research", label });
         changed(store.updateTask(task.id, {}));
         return text(`Research thread ${thread.id} started for ${task.id}. Its answer comes back to the task thread.`);
@@ -2006,6 +2055,66 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) {
       bb.log.info(`${task.id}: Jev watch skipped (${describeError(error)}).`);
     }
+  }
+
+  /** When the last model route failed: no ask for the back-off after it (modelroute.ts routeBackoff). */
+  let routeFailedAt: number | null = null;
+
+  /**
+   * The model for one agent's spawn (modelroute.ts): Sonnet only when Jev is
+   * confident, else no model, today's provider default. Never Patches, never
+   * over the owner's own pick. Bounded by the host's 2 s; any failure is no
+   * model, so a spawn never fails on it.
+   */
+  async function routeFor(input: {
+    role: RouteRole;
+    providerId: string | undefined;
+    ownerModel?: boolean;
+    hostId: string | null;
+    state: () => string;
+  }): Promise<RouteRecord> {
+    const skip = routeSkip({ role: input.role, ownerModel: input.ownerModel ?? false, providerId: input.providerId });
+    if (skip !== null) return skippedRoute(skip);
+    const started = Date.now();
+    if (routeBackoff(started, routeFailedAt)) return skippedRoute("backoff");
+    if (input.hostId === null) return skippedRoute("error", "no host");
+    let record: RouteRecord;
+    try {
+      const reply = await host.call("modelRoute", { state: input.state() }, { hostId: input.hostId, timeoutMs: ROUTE_TIMEOUT_MS + 500 });
+      record = routeDecision(reply);
+    } catch (error) {
+      record = skippedRoute("error", `host: ${describeError(error)}`);
+    }
+    if (routeFailed(record)) routeFailedAt = started;
+    return record;
+  }
+
+  /** The route of a spawned agent, in the dossier and the log. Bookkeeping: never fails the spawn. */
+  function noteRoute(threadId: string, task: Task, role: RouteRole, record: RouteRecord) {
+    try {
+      store.recordModelRoute({ threadId, taskId: task.id, projectId: task.projectId, role, routedAt: Date.now(), ...record });
+      const p = record.probability === null ? "" : ` p=${record.probability.toFixed(2)}`;
+      bb.log.info(`${task.id}: ${role} ${threadId} on ${record.model ?? "the provider default"} (${record.reason}${p}).`);
+    } catch (error) {
+      bb.log.warn(`${task.id}: recording the model route failed: ${describeError(error)}`);
+    }
+  }
+
+  /** routeKeyStatus, kept a minute: board_state runs on every dossier change. */
+  let routeKeySeen: { at: number; status: { present: true } | { present: false; problem: "missing" | "open" } | null } | null = null;
+
+  async function routeKey(hostId: string | null) {
+    if (routeKeySeen !== null && Date.now() - routeKeySeen.at < 60_000) return routeKeySeen.status;
+    let status: { present: true } | { present: false; problem: "missing" | "open" } | null = null;
+    if (hostId !== null) {
+      try {
+        status = await host.call("routeKeyStatus", {}, { hostId, timeoutMs: 5_000 });
+      } catch {
+        status = null;
+      }
+    }
+    routeKeySeen = { at: Date.now(), status };
+    return status;
   }
 
   /**
@@ -2314,10 +2423,18 @@ export default async function plugin(bb: BbPluginApi) {
         .flatMap((ticket) =>
           ticket.questions.map((question, index) => ({ question, answer: ticket.answers?.[index] ?? "" })),
         );
+      const provider = await providerOf(fresh.threadId);
+      const route = await routeFor({
+        role: "build",
+        providerId: provider.providerId,
+        hostId,
+        state: () => routeState({ role: "build", taskTitle: fresh.title, instructions: args.instructions }),
+      });
       const thread = await bb.sdk.threads.spawn({
         projectId: task.projectId,
         parentThreadId: fresh.threadId ?? undefined,
-        ...(await providerOf(fresh.threadId)),
+        ...provider,
+        ...spawnModel("build", route),
         environment: {
           type: "provider",
           environmentProviderId: WORKTREE_PROVIDER,
@@ -2341,6 +2458,7 @@ export default async function plugin(bb: BbPluginApi) {
         }),
         pluginMetadata: { role: "build", taskId: task.id },
       });
+      noteRoute(thread.id, fresh, "build", route);
       store.addChild({ threadId: thread.id, taskId: task.id, kind: "build", label: args.branch });
       changed(store.updateTask(task.id, { buildState: "running", buildFailures: 0 }));
       bb.log.info(`build ${thread.id} started for ${task.id} in ${project.name}`);
@@ -4328,16 +4446,27 @@ export default async function plugin(bb: BbPluginApi) {
       const task = store.createTask({ projectId: project.id, title, brief });
       void jevWatchTask(task, source?.hostId ?? null);
       try {
+        // The owner's picks in the composer; without them, Patches' provider.
+        const picks = execution.providerId !== undefined ? execution : await providerOf(parentThreadId);
+        // Jev's model never replaces one the owner picked (modelroute.ts ownerPickedModel).
+        const route = await routeFor({
+          role: "task",
+          providerId: picks.providerId,
+          ownerModel: execution.providerId !== undefined && ownerPickedModel(execution),
+          hostId: source?.hostId ?? null,
+          state: () => routeState({ role: "task", title, brief }),
+        });
         const thread = await bb.sdk.threads.spawn({
           projectId: project.id,
           parentThreadId,
           environment: await checkoutEnvironment(project),
-          // The owner's picks in the composer; without them, Patches' provider.
-          ...(execution.providerId !== undefined ? execution : await providerOf(parentThreadId)),
+          ...picks,
+          ...spawnModel("task", route),
           title,
           input: [{ type: "text", text: newTaskPrompt(task, project.name, others), mentions: [] }, ...input],
           pluginMetadata: { role: "task", taskId: task.id },
         });
+        noteRoute(thread.id, task, "task", route);
         changed(store.updateTask(task.id, { threadId: thread.id }));
         bb.log.info(`${Owner()} started ${task.id} "${title}" in ${project.name} with New task (thread ${thread.id}).`);
         void summarizeTitle(task.id, thread.id, title, brief, source?.hostId ?? null);
@@ -4428,6 +4557,20 @@ export default async function plugin(bb: BbPluginApi) {
         jevWatch: own
           .map((project) => ({ projectId: project.id, report: agreementReport(store.listJevWatch(project.id)) }))
           .filter((entry) => entry.report.rows > 0),
+        modelRoutes: store
+          .modelRoutes()
+          .filter((route) => Date.now() - route.routedAt < ROUTE_WINDOW_MS || tasks.some((task) => task.id === route.taskId))
+          .slice(-2000)
+          .map((route) => ({
+            threadId: route.threadId,
+            projectId: route.projectId,
+            routedAt: route.routedAt,
+            model: route.model,
+            reason: route.reason,
+            probability: route.probability,
+            answeredBy: route.jevModel,
+          })),
+        modelRouteKey: await routeKey(primaryHostId),
         signedOut: signedOutView(signInRecords()),
         ownerName: owner(),
         needsSetup: setupNeeded(projects),

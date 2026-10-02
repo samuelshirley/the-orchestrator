@@ -244,3 +244,29 @@ describe("the setup wizard's host calls", () => {
     expect(output.safeParse({ ok: false }).success).toBe(false);
   });
 });
+
+describe("Jev model routing", () => {
+  it("modelRoute takes only the state, no path, key or URL", () => {
+    const { input } = hostContract.modelRoute;
+    expect(input.safeParse({ state: "Task: x" }).success).toBe(true);
+    expect(input.safeParse({ state: "" }).success).toBe(false);
+    expect(input.safeParse({ state: "x".repeat(4001) }).success).toBe(false);
+    expect(input.safeParse({ state: "x", baseUrl: "https://evil.example" }).success).toBe(false);
+    expect(input.safeParse({ state: "x", keyPath: "/etc/passwd" }).success).toBe(false);
+  });
+  it("modelRoute returns an answer or a typed failure, never the key", () => {
+    const { output } = hostContract.modelRoute;
+    expect(output.safeParse({ ok: true, latencyMs: 3, model: "jev-1.13.0", answer: { choice: "sonnet", top: 0.8, margin: 0.6 } }).success).toBe(true);
+    expect(output.safeParse({ ok: false, kind: "no-key", problem: "open" }).success).toBe(true);
+    expect(output.safeParse({ ok: false, kind: "timeout", error: "slow", latencyMs: 2000 }).success).toBe(true);
+    expect(output.safeParse({ ok: false, kind: "no-key", problem: "open", key: "x" }).success).toBe(false);
+  });
+  it("routeKeyStatus says presence only", () => {
+    const { input, output } = hostContract.routeKeyStatus;
+    expect(input.safeParse({}).success).toBe(true);
+    expect(input.safeParse({ path: "/x" }).success).toBe(false);
+    expect(output.safeParse({ present: true }).success).toBe(true);
+    expect(output.safeParse({ present: false, problem: "missing" }).success).toBe(true);
+    expect(output.safeParse({ present: true, key: "k" }).success).toBe(false);
+  });
+});
