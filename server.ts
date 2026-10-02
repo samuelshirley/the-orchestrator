@@ -44,7 +44,7 @@ import { pluginSourceRoot } from "./builderguard.js";
 import { CHECKOUT_PROVIDER, pickCheckoutEnvironment } from "./checkout.js";
 import { ciDeferredKey, runCiPass } from "./ci.js";
 import { claimWaitKey, claimWaitsToWake, outsideClaims, outsideClaimsRefusal, planClaims, type ClaimWait } from "./claims.js";
-import { hostContract, repoSnapshotSchema, type PrFacts, type PullRequest, type RepoSnapshot } from "./contract.js";
+import { headroomViewSchema, hostContract, repoSnapshotSchema, type PrFacts, type PullRequest, type RepoSnapshot } from "./contract.js";
 import { BUILD_CAP, MAX_OPEN_QUESTIONS, answeredTaskPatch, buildsInFlight, prForTask } from "./model.js";
 import { createMemoryGuard } from "./guard.js";
 import {
@@ -590,6 +590,8 @@ export const livenessSchema = z.object({
       observedAt: z.number().nullable(),
     })
     .nullable(),
+  /** The Headroom proxy's line (headroom.ts headroomView); null before the first beat answered. */
+  headroom: headroomViewSchema.nullable(),
 });
 export type LivenessView = z.infer<typeof livenessSchema>;
 
@@ -775,6 +777,8 @@ export const rpcContract = defineRpcContract({
   },
   /** The last liveness check (liveness.ts): cached, so polling it costs nothing. */
   liveness: { input: z.object({}).strict(), output: livenessSchema },
+  /** Stop the Headroom proxy for good (agents go direct), or start it again. */
+  headroom_control: { input: z.object({ action: z.enum(["stop", "start"]) }).strict(), output: z.object({ ok: z.literal(true) }) },
   /** The owner's Restart on a task thread in trouble: retry its failed turn, or stop a silent one and tell it to carry on. */
   agent_restart: {
     input: z.object({ taskId: z.string().min(1).max(100) }).strict(),
@@ -4017,7 +4021,7 @@ export default async function plugin(bb: BbPluginApi) {
   // for each open task's thread and its latest research and build, and the
   // last event only for busy threads.
   const LIVENESS_INCIDENTS_KEY = "liveness_incidents";
-  let liveness: LivenessView = { checkedAt: null, error: null, configProblem: null, tasks: [], chats: [], others: [], usage: null };
+  let liveness: LivenessView = { checkedAt: null, error: null, configProblem: null, tasks: [], chats: [], others: [], usage: null, headroom: null };
   /** The local config's problem for the board: nothing before the first read was tried. */
   const configProblem = () => (localConfigTried ? localConfig.problem : null);
   let checkingLiveness = false;
@@ -4217,6 +4221,9 @@ export default async function plugin(bb: BbPluginApi) {
       });
       void reposInflight.catch((error: unknown) => bb.log.warn(`review check: repo read failed: ${describeError(error)}`));
     }
+    // First and on its own: a proxy that died must stop being routed to
+    // even when the rest of the check fails.
+    const headroom = await checkHeadroom();
     try {
       await loadLocalConfig();
       await readUsage();
@@ -4302,7 +4309,7 @@ export default async function plugin(bb: BbPluginApi) {
         entry.unheard = unheardReason(fix, projectNames.get(fix?.projectId ?? "") ?? "its project");
       }
       const others = await checkOthers(running, refused, waits, projects);
-      liveness = { checkedAt: Date.now(), error: null, configProblem: configProblem(), tasks: results, chats, others, usage: currentUsage() };
+      liveness = { checkedAt: Date.now(), error: null, configProblem: configProblem(), tasks: results, chats, others, usage: currentUsage(), headroom };
       const reattached = await reattachTasks(fixes, projects);
       if (reattached.size > 0) {
         liveness = {
@@ -4320,12 +4327,48 @@ export default async function plugin(bb: BbPluginApi) {
       }
       void archiveClosedChats();
     } catch (error) {
-      liveness = { ...liveness, configProblem: configProblem(), error: `the liveness check failed: ${describeError(error)}` };
+      liveness = { ...liveness, headroom, configProblem: configProblem(), error: `the liveness check failed: ${describeError(error)}` };
       bb.log.warn(`liveness: check failed: ${describeError(error)}`);
     } finally {
       checkingLiveness = false;
     }
   }
+
+  /**
+   * Headroom (headroom.ts; the host does the work): one beat per liveness
+   * check, routing every project's main checkout and every open task's
+   * worktree on this host through the proxy while it is healthy. A failed
+   * call keeps the last view.
+   */
+  async function checkHeadroom(): Promise<LivenessView["headroom"]> {
+    try {
+      const projects = await allProjects();
+      const hostId = (await bb.sdk.system.config()).primaryHostId ?? null;
+      if (hostId === null) return liveness.headroom;
+      const checkouts: string[] = [];
+      for (const project of projects) {
+        if (project.kind === "personal") continue;
+        const source = sourceOf(project);
+        if (source !== null && source.hostId === hostId) checkouts.push(source.path);
+      }
+      for (const task of store.tasks({ includeClosed: false })) {
+        if (task.worktreePath !== null) checkouts.push(task.worktreePath);
+      }
+      const beat = await host.call("headroomBeat", { checkouts: [...new Set(checkouts)].slice(0, 200) }, { hostId, timeoutMs: 25_000 });
+      for (const skip of beat.skipped) {
+        const key = `${skip.path}\n${skip.reason}`;
+        if (headroomSkipsLogged.has(key)) continue;
+        headroomSkipsLogged.add(key);
+        bb.log.warn(`headroom: left ${skip.path} alone: ${skip.reason}`);
+      }
+      if (beat.view.line !== liveness.headroom?.line && beat.view.state !== "on") bb.log.info(beat.view.line);
+      return beat.view;
+    } catch (error) {
+      bb.log.warn(`headroom: beat failed: ${describeError(error)}`);
+      return liveness.headroom;
+    }
+  }
+  const headroomSkipsLogged = new Set<string>();
 
   /**
    * Loose threads, display only: no tells, tickets or stops. An unreadable
@@ -4379,6 +4422,14 @@ export default async function plugin(bb: BbPluginApi) {
   // -------------------------------------------------------------------- RPC
   bb.rpc.register(rpcContract, {
     liveness: async () => ({ ...liveness, configProblem: configProblem() }),
+
+    headroom_control: async ({ action }) => {
+      const hostId = (await bb.sdk.system.config()).primaryHostId ?? null;
+      if (hostId === null) throw new Error("no host is connected");
+      await host.call("headroomControl", { action }, { hostId, timeoutMs: 20_000 });
+      void checkLiveness();
+      return { ok: true as const };
+    },
 
     agent_restart: async ({ taskId: id }) => {
       const task = store.task(id);

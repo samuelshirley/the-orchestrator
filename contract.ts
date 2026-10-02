@@ -197,6 +197,25 @@ const killTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("pid"), pid: z.number().int().gt(1) }),
 ]);
 
+/** The board's Headroom line (headroom.ts headroomView). */
+export const headroomViewSchema = z
+  .object({
+    state: z.enum(["on", "installing", "starting", "down", "off"]),
+    line: text(300),
+    needsOwner: z.object({ title: text(100), body: text(500), command: text(1200) }).strict().nullable(),
+  })
+  .strict();
+export type HeadroomViewOutput = z.infer<typeof headroomViewSchema>;
+
+const headroomBeatOutputSchema = z
+  .object({
+    view: headroomViewSchema,
+    /** Checkouts left alone this beat, and why. */
+    skipped: z.array(z.object({ path: text(1000), reason: text(300) }).strict()).max(50),
+  })
+  .strict();
+export type HeadroomBeatOutput = z.infer<typeof headroomBeatOutputSchema>;
+
 export const hostContract = defineRpcContract({
   /**
    * The AI-service methods core calls for the `local` service server.ts
@@ -669,5 +688,21 @@ export const hostContract = defineRpcContract({
   claudeSignIn: {
     input: z.object({}).strict(),
     output: z.object({ ok: z.boolean(), error: text(200).nullable() }).strict(),
+  },
+  /**
+   * One liveness beat for the Headroom proxy (headroom.ts): install, start or
+   * restart it as headroomStep says, then put ANTHROPIC_BASE_URL in each
+   * checkout's .claude/settings.local.json while it is healthy and take ours
+   * out while it is not (never one the owner set; never in a checkout whose
+   * .claude/ git does not ignore). The install runs in the background.
+   */
+  headroomBeat: {
+    input: z.object({ checkouts: z.array(path).max(200) }).strict(),
+    output: headroomBeatOutputSchema,
+  },
+  /** The owner's explicit stop, or start again; nothing else stops the proxy for good. */
+  headroomControl: {
+    input: z.object({ action: z.enum(["stop", "start"]) }).strict(),
+    output: z.object({ ok: z.literal(true) }).strict(),
   },
 });

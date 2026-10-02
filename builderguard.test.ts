@@ -13,6 +13,7 @@ import {
   repoOf,
   type GuardContext,
 } from "./builderguard";
+import { HEADROOM_URL, applyRouting, routeSettingsText } from "./headroom";
 
 const REPO = "/Users/me/Github/app";
 const WT = `${REPO}/.claude/worktrees/x`;
@@ -332,6 +333,20 @@ describe("builderSettings", () => {
 
   it("starts from nothing when the existing file isn't an object", () => {
     expect(builderSettings(["junk"], options)).toEqual(builderSettings({}, options));
+  });
+
+  it("keeps Headroom's routing, and routing keeps the guard (host prepareWorktree, headroom.ts)", () => {
+    const guarded = builderSettings({}, options);
+    const routed = applyRouting(guarded, true) as Record<string, unknown>;
+    expect(routed.env).toEqual({ ANTHROPIC_BASE_URL: HEADROOM_URL });
+    // Re-guarding a routed worktree keeps the route…
+    expect(builderSettings(routed, options)).toEqual(routed);
+    // …and the beat's on/off never touches the guard's keys.
+    const off = routeSettingsText(JSON.stringify(routed), false);
+    expect(off.action === "write" ? JSON.parse(off.text) : off).toEqual(guarded);
+    const owner = builderSettings({ env: { ANTHROPIC_BASE_URL: "https://gw.example.com" } }, options);
+    expect(applyRouting(owner, true)).toBeNull();
+    expect(applyRouting(owner, false)).toBeNull();
   });
 });
 

@@ -594,6 +594,46 @@ until the project has a row.
   box deletes itself after 15 idle minutes or 4 hours, and a $20 cap applies.
   See [jev/README.md](../jev/README.md). `jev up` never runs without the owner's ok.
 
+## Headroom (fewer tokens per request)
+
+Every agent The Orchestrator runs (Patches chats, task, research and build
+threads, in every project) sends its requests through Headroom, a local proxy
+that compresses what Claude Code sends (`headroom.ts`). It runs in cache mode,
+so earlier turns stay byte-identical and Claude's prompt cache still hits. Sam
+decided this on 2 Oct 2026.
+
+- **Fail open.** Agents reach it through `env.ANTHROPIC_BASE_URL =
+  "http://127.0.0.1:8791"` in `.claude/settings.local.json` of each project's
+  main checkout and each open task's worktree. That key is there only while
+  the proxy is healthy; down, not installed or stopped, it is taken out and
+  agents go straight to Claude. Only that one key changes; a file that does
+  not parse, or a checkout whose `.claude/` git does not ignore, is left
+  alone. An `ANTHROPIC_BASE_URL` the owner set is never changed or removed.
+  A Claude process reads its env when it starts, so a proxy that dies
+  mid-turn fails that turn's calls until the next beat restarts it.
+- **Private.** It listens on 127.0.0.1 only. Its upload of anonymous session
+  summaries to Headroom Labs and its telemetry are always off
+  (`HEADROOM_BEACON=off HEADROOM_TELEMETRY=off DO_NOT_TRACK=1`). It still
+  fetches a tokenizer file and LiteLLM's price list on first use.
+- **Installed and run by The Orchestrator.** The host installs the pinned
+  `headroom-ai[proxy]==0.39.1` with uv on Python 3.12 under
+  `~/.local/share/the-orchestrator/headroom/` (never `[all]`: torch and
+  models), its output only in `install.log` there. A failed install is tried
+  again after an hour. The proxy starts detached in its own process group
+  with a pid file and logs to `proxy.log`, so a reload (every land) does not
+  stop it; the next host adopts it through `/health`.
+- **On the liveness beat** (30 s): not running, start it; unhealthy (`/health`
+  not 200, startup not ready, or no pid) two beats in a row, or over 1.5 GB,
+  restart it. At most 4 starts in 15 minutes; past that it stays down, and
+  after 30 minutes down it is one Needs you item with the log to read.
+  Only an explicit stop (`headroom_control`) keeps it off.
+- **On the board.** One line in the header: "Headroom: on · 1.2M tokens
+  removed (8.6%)" from what compression measurably removed since the proxy
+  started (never Headroom's tool-list estimate), or installing, starting,
+  "down, agents go direct (why)", or off.
+- **Memory.** The proxy counts in the agent tree budget wherever it runs, but
+  the guard never kills it.
+
 ## Files
 
 | File | Holds |
@@ -634,6 +674,7 @@ until the project has a row.
 | `typesafe.ts` | TypeSafe's URL and model, reading `JEV_API_KEY` from `jev.env`, refusing a file others can read |
 | `jevwatch.ts` | Jev, watch only: the two questions, reading an answer, the host's bounded ask, the actual outcome, the agreement report |
 | `jev/` | The Jev box: `cli.ts` (up, down, status, dry-run), `policy.ts` (cap, watchdog, Verda bodies, ledger), `box/` (setup, Caddy, watchdog, AnyJev shim) |
+| `headroom.ts` | Headroom: the pinned install and run commands, the privacy env, reading `/health` and `/stats`, the start/restart rules, the settings key, the board's line |
 | `builderguard.ts` | The builder guard: the Bash hook's command policy and the worktree's sandbox settings; node runs it directly |
 
 ## Memory
@@ -644,7 +685,8 @@ started (the agent tree), every 10 s. At most 4 agents work at once; below
 with the reason), and `build` refuses below 30% or at 40%. At 55% of RAM in
 the tree, or one agent process at 25%, it kills the largest agent process
 with its process group (a shell's `cmd &` children go with it) and tells its
-thread; never claude, bb, Chrome or anything under /Applications/. Below 10%
+thread; never claude, bb, the Headroom proxy, Chrome or anything under
+/Applications/. Below 10%
 free it stops the newest builder, then research, then tasks. It logs
 "memory guard: live" on its first reading and a heartbeat every 10 minutes.
 Keep `./memwatch.sh` running in a terminal tab as the backstop: it watches

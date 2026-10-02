@@ -38,6 +38,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   realpath,
@@ -63,10 +64,31 @@ import {
   type RepoSnapshot,
   type AiVoiceTranscribeInput,
   type AiVoiceTranscribeOutput,
+  type HeadroomBeatOutput,
 } from "./contract.js";
 import { SIGN_IN_ARGS, SIGN_IN_TIMEOUT_MS, signInPathDirs, signInSpawnError } from "./signin.js";
 import { killAgentProcess, readMemory } from "./memory-probe.js";
 import { builderSettings, envPatternsOf, guardHookCommand } from "./builderguard.js";
+import {
+  HEADROOM_URL,
+  HEADROOM_VERSION,
+  INSTALL_TIMEOUT_MS,
+  PROBE_TIMEOUT_MS,
+  applyRouting,
+  headroomPaths,
+  headroomStep,
+  headroomView,
+  installSteps,
+  isHeadroomProxy,
+  parseHealth,
+  parseState,
+  parseStats,
+  routeSettingsText,
+  runArgv,
+  runEnv,
+  type HeadroomState,
+  type Health,
+} from "./headroom.js";
 import {
   GH_LOGIN_ARGS,
   SLUG_PATTERN,
@@ -164,14 +186,295 @@ async function writeBuilderGuard(
   } catch {
     // None yet, or not JSON (Claude Code couldn't read it either): start fresh.
   }
-  const settings = builderSettings(existing, {
+  const guarded = builderSettings(existing, {
     hookCommand: guardHookCommand(root, worktreePath),
     repoPath,
     envPatterns: envPatternsOf(include),
     worktreePath,
   });
+  // Through Headroom from its first turn while the proxy is healthy (headroom.ts).
+  const settings = applyRouting(guarded, headroom.route) ?? guarded;
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+// ---------------------------------------------------------------- Headroom
+// headroom.ts holds the policy; here: the install (output only to its log),
+// a detached proxy (own process group, pid file) that outlives a plugin
+// reload and is adopted by the next host, /health and /stats with short
+// timeouts, and ANTHROPIC_BASE_URL in each managed checkout's
+// .claude/settings.local.json only while the proxy is healthy.
+
+const headroom = {
+  paths: headroomPaths(homedir()),
+  state: null as HeadroomState | null,
+  installing: false,
+  /** Whether agents go through the proxy: the last beat found it healthy. */
+  route: false,
+  beating: false,
+  /** Checkouts whose .claude/ git ignores (only those are touched), by path. */
+  ignored: new Map<string, boolean>(),
+};
+
+async function headroomState(): Promise<HeadroomState> {
+  if (headroom.state === null) {
+    headroom.state = parseState(await readFile(headroom.paths.stateFile, "utf8").catch(() => null));
+  }
+  return headroom.state;
+}
+
+async function saveHeadroomState(state: HeadroomState): Promise<void> {
+  const before = JSON.stringify(headroom.state);
+  headroom.state = state;
+  if (JSON.stringify(state) === before && existsSync(headroom.paths.stateFile)) return;
+  await mkdir(headroom.paths.dir, { recursive: true });
+  await writeAtomically(headroom.paths.stateFile, `${JSON.stringify(state)}\n`);
+}
+
+async function writeAtomically(file: string, text: string): Promise<void> {
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmp, text);
+  try {
+    await rename(tmp, file);
+  } catch (error) {
+    await rm(tmp, { force: true });
+    throw error;
+  }
+}
+
+async function headroomGet(path: string, signal: AbortSignal): Promise<{ status: number; body: unknown } | null> {
+  try {
+    const response = await fetch(`${HEADROOM_URL}${path}`, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]),
+      redirect: "error",
+    });
+    const text = (await response.text()).slice(0, 2_000_000);
+    let body: unknown = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+    return { status: response.status, body };
+  } catch {
+    return null;
+  }
+}
+
+/** pgid, rss and command of a live pid, or null. */
+async function processFacts(pid: number, signal: AbortSignal): Promise<{ pgid: number; rssBytes: number; command: string } | null> {
+  const out = await new Promise<string | null>((done) =>
+    execFile("/bin/ps", ["-o", "pgid=,rss=,command=", "-p", String(pid)], { signal, timeout: 5_000 }, (error, stdout) =>
+      done(error ? null : stdout),
+    ),
+  );
+  const match = out === null ? null : /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/m.exec(out);
+  if (match === null) return null;
+  return { pgid: Number(match[1]), rssBytes: Number(match[2]) * 1024, command: match[3]! };
+}
+
+/** Our proxy's pid: the one /health names, else the pid file's while it runs our proxy. */
+async function headroomPid(health: Health, signal: AbortSignal): Promise<number | null> {
+  const named = health.pid;
+  const fromFile = Number((await readFile(headroom.paths.pidFile, "utf8").catch(() => "")).trim());
+  for (const pid of [named, Number.isInteger(fromFile) && fromFile > 1 ? fromFile : null]) {
+    if (pid === null) continue;
+    const facts = await processFacts(pid, signal);
+    if (facts !== null && isHeadroomProxy(facts.command)) {
+      if (pid !== fromFile) await writeFile(headroom.paths.pidFile, `${pid}\n`).catch(() => undefined);
+      return pid;
+    }
+  }
+  return null;
+}
+
+/** Stop our proxy: its own group (it was started detached), TERM then KILL. Only ever a headroom proxy. */
+async function stopHeadroomProxy(pid: number, signal: AbortSignal): Promise<void> {
+  const facts = await processFacts(pid, signal);
+  if (facts === null || !isHeadroomProxy(facts.command)) return;
+  const id = facts.pgid === pid ? -pid : pid;
+  try {
+    process.kill(id, "SIGTERM");
+  } catch {
+    return;
+  }
+  for (let waited = 0; waited < 5_000; waited += 250) {
+    await new Promise((done) => setTimeout(done, 250));
+    if ((await processFacts(pid, signal)) === null) return;
+  }
+  try {
+    process.kill(id, "SIGKILL");
+  } catch {
+    // Gone between the check and the kill.
+  }
+}
+
+const HEADROOM_LOG_MAX_BYTES = 10 * 1024 ** 2;
+
+/** Start the proxy detached, so a reload of this host leaves it running; its output goes to its log. */
+async function startHeadroomProxy(): Promise<void> {
+  const { paths } = headroom;
+  await mkdir(paths.dir, { recursive: true });
+  const size = await stat(paths.log).then((s) => s.size, () => 0);
+  if (size > HEADROOM_LOG_MAX_BYTES) await rename(paths.log, `${paths.log}.1`).catch(() => undefined);
+  const log = await open(paths.log, "a");
+  try {
+    const [command, ...args] = runArgv(paths);
+    const child = spawn(command!, args, {
+      cwd: paths.dir,
+      env: runEnv(process.env),
+      detached: true,
+      stdio: ["ignore", log.fd, log.fd],
+    });
+    child.on("error", (error) => console.warn(`headroom: start failed: ${error.message}`));
+    child.unref();
+    if (child.pid !== undefined) await writeFile(paths.pidFile, `${child.pid}\n`);
+  } finally {
+    await log.close();
+  }
+}
+
+/** The install, in the background: each step's output only to install.log, the whole bounded by INSTALL_TIMEOUT_MS. */
+function installHeadroom(): void {
+  if (headroom.installing) return;
+  headroom.installing = true;
+  const { paths } = headroom;
+  const deadline = Date.now() + INSTALL_TIMEOUT_MS;
+  void (async () => {
+    await mkdir(paths.dir, { recursive: true });
+    const log = await open(paths.installLog, "w");
+    try {
+      const python = existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+      for (const step of installSteps(paths, python)) {
+        if (step.creates !== null && existsSync(step.creates)) continue;
+        await log.write(`$ ${step.argv.join(" ")}\n`);
+        const code = await new Promise<number | string>((done) => {
+          const [command, ...args] = step.argv;
+          const child = spawn(command!, args, {
+            cwd: paths.dir,
+            env: { ...setupEnv(process.env), ...step.env },
+            stdio: ["ignore", log.fd, log.fd],
+            timeout: Math.max(1_000, deadline - Date.now()),
+            killSignal: "SIGKILL",
+          });
+          child.on("error", (error) => done(error.message));
+          child.on("exit", (exitCode, signalName) => done(exitCode ?? `killed by ${signalName ?? "a signal"}`));
+        });
+        if (code !== 0) {
+          throw new Error(
+            typeof code === "string" ? `${base(step.argv[0]!)} ${step.argv[1]}: ${code}` : `${base(step.argv[0]!)} ${step.argv[1]} exited ${code}`,
+          );
+        }
+      }
+      if (!existsSync(paths.bin)) throw new Error(`the install finished without ${paths.bin}`);
+      await writeFile(paths.marker, `${HEADROOM_VERSION}\n`);
+      await saveHeadroomState({ ...(await headroomState()), installFailedAt: null, installError: null });
+    } catch (error) {
+      const message = clip(error instanceof Error ? error.message : String(error), 300);
+      await log.write(`\nfailed: ${message}\n`).catch(() => undefined);
+      await saveHeadroomState({ ...(await headroomState()), installFailedAt: Date.now(), installError: message });
+    } finally {
+      await log.close();
+      headroom.installing = false;
+    }
+  })().catch((error: unknown) => {
+    headroom.installing = false;
+    console.warn(`headroom: install failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+function base(path: string): string {
+  return path.replace(/.*\//, "");
+}
+
+async function headroomInstalled(): Promise<boolean> {
+  const marker = (await readFile(headroom.paths.marker, "utf8").catch(() => "")).trim();
+  return marker === HEADROOM_VERSION && existsSync(headroom.paths.bin);
+}
+
+/**
+ * Routing on or off in one checkout's .claude/settings.local.json: one key
+ * changed, the file written atomically, never in a checkout whose .claude/
+ * git does not ignore, never over a file that does not parse.
+ */
+async function routeCheckout(checkout: string, on: boolean, signal: AbortSignal): Promise<string | null> {
+  let ignored = headroom.ignored.get(checkout);
+  if (ignored === undefined) {
+    if (!existsSync(checkout)) return "the checkout is gone";
+    ignored = await gitYesNo(["check-ignore", "-q", ".claude/settings.local.json"], checkout, signal);
+    headroom.ignored.set(checkout, ignored);
+  }
+  if (!ignored) return ".claude/ is not gitignored there";
+  const file = join(checkout, ".claude", "settings.local.json");
+  const text = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  const change = routeSettingsText(text, on);
+  if (change.action === "skip") return `settings.local.json ${change.reason}; left alone`;
+  if (change.action === "none") return null;
+  await mkdir(dirname(file), { recursive: true });
+  await writeAtomically(file, change.text);
+  return null;
+}
+
+async function headroomBeat(checkouts: readonly string[], signal: AbortSignal): Promise<HeadroomBeatOutput> {
+  const { paths } = headroom;
+  if (headroom.beating) {
+    return { view: headroomView({ state: await headroomState(), route: headroom.route, stats: null, now: Date.now(), paths }), skipped: [] };
+  }
+  headroom.beating = true;
+  try {
+    const state = await headroomState();
+    const reply = await headroomGet("/health", signal);
+    const health = parseHealth(reply?.status ?? null, reply?.body ?? null);
+    const pid = await headroomPid(health, signal);
+    const rssBytes = pid === null ? null : ((await processFacts(pid, signal))?.rssBytes ?? null);
+    const decision = headroomStep(state, {
+      now: Date.now(),
+      installed: await headroomInstalled(),
+      installing: headroom.installing,
+      pid,
+      health,
+      rssBytes,
+    });
+    // Routing goes off before anything is stopped, so new turns go direct.
+    headroom.route = decision.route;
+    if (decision.action === "install") installHeadroom();
+    if (decision.action === "restart" && pid !== null) await stopHeadroomProxy(pid, signal);
+    if (decision.action === "start" || decision.action === "restart") {
+      await startHeadroomProxy().catch((error: unknown) => console.warn(`headroom: start failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
+    await saveHeadroomState(decision.state);
+    const skipped: HeadroomBeatOutput["skipped"] = [];
+    for (const checkout of new Set(checkouts)) {
+      try {
+        const problem = await routeCheckout(checkout, headroom.route, signal);
+        if (problem !== null) skipped.push({ path: clip(checkout, 1000), reason: clip(problem, 300) });
+      } catch (error) {
+        skipped.push({ path: clip(checkout, 1000), reason: clip(error instanceof Error ? error.message : String(error), 300) });
+      }
+    }
+    const statsReply = headroom.route ? await headroomGet("/stats", signal) : null;
+    const stats = statsReply !== null && statsReply.status === 200 ? parseStats(statsReply.body) : null;
+    return { view: headroomView({ state: decision.state, route: headroom.route, stats, now: Date.now(), paths }), skipped: skipped.slice(0, 50) };
+  } finally {
+    headroom.beating = false;
+  }
+}
+
+/** The owner's explicit stop (and start again): the only thing that stops the proxy for good. */
+async function headroomControl(action: "stop" | "start", signal: AbortSignal): Promise<void> {
+  const state = await headroomState();
+  if (action === "start") {
+    await saveHeadroomState({ ...state, stopped: false, starts: [] });
+    return;
+  }
+  headroom.route = false;
+  await saveHeadroomState({ ...state, stopped: true });
+  const reply = await headroomGet("/health", signal);
+  const pid = await headroomPid(parseHealth(reply?.status ?? null, reply?.body ?? null), signal);
+  if (pid !== null) await stopHeadroomProxy(pid, signal);
 }
 
 function run(
@@ -1675,6 +1978,13 @@ export default experimental_defineHostEntry({
     },
 
     memoryStatus: async (_input, { signal }) => readMemory(signal),
+
+    headroomBeat: async ({ checkouts }, { signal }) => headroomBeat(checkouts, signal),
+
+    headroomControl: async ({ action }, { signal }) => {
+      await headroomControl(action, signal);
+      return { ok: true as const };
+    },
 
     localConfig: async (_input, { experimental_paths }) => {
       const text = await readLocalConfigText(homedir());

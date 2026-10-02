@@ -507,6 +507,19 @@ function UsageStatus({ usage }: { usage: LivenessView["usage"] }) {
   );
 }
 
+/** "Headroom: on · 1.2M tokens removed (8.6%)" in the header (headroom.ts headroomView); amber while it is down. */
+function HeadroomStatus({ headroom }: { headroom: LivenessView["headroom"] }) {
+  if (headroom === null) return null;
+  return (
+    <span
+      title={`${headroom.line}. Every agent's requests go through the local Headroom proxy while it is healthy; when it is not, they go straight to Claude.`}
+      className={cn("orc-headroom min-w-0 truncate", headroom.state === "down" && "orc-live-waiting")}
+    >
+      {headroom.line}
+    </span>
+  );
+}
+
 /** Near or at the limit: what that means for new work, one line under the header. */
 function UsageWarningLine({ usage }: { usage: LivenessView["usage"] }) {
   const now = useNow(30_000);
@@ -1693,6 +1706,7 @@ function SetupWizard({
 function NeedsYouSection({
   items,
   state,
+  headroom,
   colors,
   onSelect,
   rpc,
@@ -1700,6 +1714,8 @@ function NeedsYouSection({
 }: {
   items: readonly NeedsYouItem[];
   state: BoardState;
+  /** Headroom down past its restart cap for 30 min (headroom.ts headroomView); null otherwise. */
+  headroom: NonNullable<LivenessView["headroom"]>["needsOwner"];
   colors: ReadonlyMap<string, string>;
   onSelect: (threadId: string) => void;
   rpc: Rpc;
@@ -1709,7 +1725,7 @@ function NeedsYouSection({
   const [error, setError] = useState<string | null>(null);
   // Claude signed out is one item of its own, whatever the project or task in view.
   const signedOut = state.signedOut === null ? null : signedOutItem(state.signedOut);
-  const count = items.length + (signedOut === null ? 0 : 1);
+  const count = items.length + (signedOut === null ? 0 : 1) + (headroom === null ? 0 : 1);
   const signIn = useClaudeSignIn(rpc);
   const resetSignIn = signIn.reset;
   useEffect(() => {
@@ -1740,6 +1756,20 @@ function NeedsYouSection({
                 </div>
                 {state.signedOut !== null ? <SignInResult result={signIn.result} words={signInPopup(state.signedOut)} /> : null}
                 <span className="text-xs text-muted-foreground">Only you can: it needs your {signedOut.reason}.</span>
+              </div>
+            </li>
+          ) : null}
+          {headroom !== null ? (
+            <li className="orc-ticket rounded-lg border border-border bg-card p-3" style={tint("var(--warning)")}>
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-medium text-foreground">{headroom.title}</p>
+                <p className="text-sm text-foreground">{headroom.body}</p>
+                <div className="flex items-start gap-2">
+                  <pre className="min-w-0 flex-1 overflow-x-auto rounded-md border border-border bg-muted px-2 py-1 font-mono text-xs">{headroom.command}</pre>
+                  <Button type="button" size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(headroom.command)}>
+                    Copy
+                  </Button>
+                </div>
               </div>
             </li>
           ) : null}
@@ -3118,6 +3148,7 @@ function BoardPage({ subPath }: PluginNavPanelProps) {
           <span className="flex-1" />
           <LivenessStatus checkedAt={liveness?.checkedAt ?? null} error={livenessError ?? stateError ?? liveness?.error ?? null} />
           <UsageStatus usage={liveness?.usage ?? null} />
+          <HeadroomStatus headroom={liveness?.headroom ?? null} />
           <span className="shrink-0" title="Across every project">
             Builds {state.buildsInFlight}/{state.buildCap || BUILD_CAP}
           </span>
@@ -3180,7 +3211,15 @@ function BoardPage({ subPath }: PluginNavPanelProps) {
             />
           ) : (
             <>
-              <NeedsYouSection items={shownNeeds} state={state} colors={colors} onSelect={select} rpc={rpc} reload={reload} />
+              <NeedsYouSection
+                items={shownNeeds}
+                state={state}
+                headroom={liveness?.headroom?.needsOwner ?? null}
+                colors={colors}
+                onSelect={select}
+                rpc={rpc}
+                reload={reload}
+              />
               <section aria-label="Tasks" className="border-b border-border p-3">
                 <table className="orc-table w-full table-fixed border-separate border-spacing-y-1">
                   <colgroup>

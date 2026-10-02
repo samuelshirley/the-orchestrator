@@ -394,3 +394,27 @@ describe("tree budget: pickProcessKill", () => {
     expect(text).toContain("ffmpeg -threads 2");
   });
 });
+
+describe("the Headroom proxy in the tree budget", () => {
+  const PROXY = "/Users/sam/.local/share/the-orchestrator/headroom/venv/bin/python /Users/sam/.local/share/the-orchestrator/headroom/venv/bin/headroom proxy --host 127.0.0.1 --port 8791 --mode cache";
+  it("is never killed, but an agent's own `headroom proxy` elsewhere is", () => {
+    expect(neverKill(PROXY)).toBe(true);
+    expect(neverKill("/tmp/venv/bin/headroom proxy --port 9000")).toBe(false);
+  });
+  it("counts in the tree whether the host started it or launchd adopted it after a reload", () => {
+    const started = [...machine(), row(30000, 17678, 30000, 0.9, PROXY)];
+    expect(treeOf(started).has(30000)).toBe(true);
+    const adopted = [...machine(), row(30000, 1, 30000, 0.9, PROXY), row(30001, 30000, 30000, 0.1, "/usr/bin/some-helper")];
+    const t = treeOf(adopted);
+    expect(t.has(30000)).toBe(true);
+    expect(t.has(30001)).toBe(true);
+    const { treeBytes, heavy: top } = summarizeTree(adopted, t);
+    expect(treeBytes).toBe(summarizeTree(machine(), treeOf(machine())).treeBytes + Math.round(1.0 * GB));
+    expect(top.find((p) => p.pid === 30000)?.target).toBeNull();
+  });
+  it("is never the victim even when it is the largest", () => {
+    const hog = heavy(10, { pid: 30000, command: PROXY, target: { kind: "pid", pid: 30000 } });
+    expect(pickProcessKill(tree(15, [hog]), null, NOW)).toBeNull();
+    expect(pickProcessKill(tree(15, [hog, heavy(1)]), null, NOW)?.victim.pid).toBe(21980);
+  });
+});

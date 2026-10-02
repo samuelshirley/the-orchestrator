@@ -119,6 +119,12 @@ what must not break.
   at most 3 tabs of its own, released when its pass ends. Builders: no browser.
 - `memwatch.sh` is the backstop outside bb: it kills the largest process in
   bb's tree before the Mac runs out, and logs to `.memwatch/`.
+- Headroom (`headroom.ts`, host beat): every agent goes through a local
+  proxy, fail-open: `ANTHROPIC_BASE_URL` is in managed checkouts'
+  `.claude/settings.local.json` only while it is healthy, never touching one
+  the owner set. Beacon and telemetry off, 127.0.0.1 only, pinned version,
+  detached so it survives reloads; counted in the agent tree budget, never
+  killed by it.
 - Jev steers one thing: the model of task, research and build agents
   (`modelroute.ts`), through TypeSafe with the key in
   `~/.config/the-orchestrator/jev.env` (`typesafe.ts`; only host.ts reads it,

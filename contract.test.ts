@@ -270,3 +270,28 @@ describe("Jev model routing", () => {
     expect(output.safeParse({ present: true, key: "k" }).success).toBe(false);
   });
 });
+
+describe("headroomBeat", () => {
+  const { input, output } = hostContract.headroomBeat;
+  const view = { state: "on", line: "Headroom: on · 1.2M tokens removed (8.6%)", needsOwner: null };
+  it("takes only the checkouts to route", () => {
+    expect(input.safeParse({ checkouts: ["/Users/me/Github/app", "/Users/me/Github/app/.claude/worktrees/x"] }).success).toBe(true);
+    expect(input.safeParse({ checkouts: [""] }).success).toBe(false);
+    expect(input.safeParse({ checkouts: [], url: "http://0.0.0.0:1" }).success).toBe(false);
+  });
+  it("returns the board's view and the checkouts left alone, nothing raw", () => {
+    expect(output.safeParse({ view, skipped: [] }).success).toBe(true);
+    expect(output.safeParse({ view: { ...view, state: "down", needsOwner: { title: "Headroom is down", body: "b", command: "tail -n 100 /x/proxy.log" } }, skipped: [{ path: "/a", reason: ".claude/ is not gitignored there" }] }).success).toBe(true);
+    expect(output.safeParse({ view, skipped: [], log: "raw install output" }).success).toBe(false);
+    expect(output.safeParse({ view: { ...view, state: "maybe" }, skipped: [] }).success).toBe(false);
+  });
+});
+
+describe("headroomControl", () => {
+  it("is stop or start, nothing else", () => {
+    const { input } = hostContract.headroomControl;
+    expect(input.safeParse({ action: "stop" }).success).toBe(true);
+    expect(input.safeParse({ action: "start" }).success).toBe(true);
+    expect(input.safeParse({ action: "install" }).success).toBe(false);
+  });
+});
