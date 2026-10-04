@@ -79,7 +79,7 @@ import { INITIAL_LOCAL_CONFIG, configBlocks, nextLocalConfig, type LocalConfigSt
 import { backupPush, buildBaseRef, profileFor, worktreeIncludeOf, type ProjectProfile } from "./profiles.js";
 import { headShaUpdate, prCounts, staleReason, type BranchFate } from "./release.js";
 import { threadRole } from "./roles.js";
-import { agentEnv, routeFresh, type RouteReading } from "./headroom.js";
+import { agentEnv, controlRefusal, routeFresh, type RouteReading } from "./headroom.js";
 import {
   closeHeldKey,
   closeHold,
@@ -781,7 +781,7 @@ export const rpcContract = defineRpcContract({
   },
   /** The last liveness check (liveness.ts): cached, so polling it costs nothing. */
   liveness: { input: z.object({}).strict(), output: livenessSchema },
-  /** Stop Headroom for good (new threads go direct; the relay goes once no agent turn runs), or start it again. */
+  /** Stop Headroom (new threads go direct; the relay goes once no agent turn runs). Start refuses while headroom.ts OFF_FOR_GOOD holds. */
   headroom_control: {
     input: z.object({ action: z.enum(["stop", "start"]) }).strict(),
     /** relayWaits: why the relay is still up after a stop (agent turns running); a later beat stops it. */
@@ -4561,6 +4561,8 @@ export default async function plugin(bb: BbPluginApi) {
     liveness: async () => ({ ...liveness, configProblem: configProblem() }),
 
     headroom_control: async ({ action }) => {
+      const refusal = controlRefusal(action);
+      if (refusal !== null) throw new Error(refusal);
       const hostId = (await bb.sdk.system.config()).primaryHostId ?? null;
       if (hostId === null) throw new Error("no host is connected");
       // Stop: no new thread is routed from this moment, before the host has answered.

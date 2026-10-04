@@ -546,7 +546,11 @@ Jev one question: does this agent need Sonnet or Opus? (`modelroute.ts`)
 - **Who.** Task threads (title and brief), research threads (task title and
   question) and builders (task title and build instructions). Never Patches:
   her chats keep the provider default. A model the owner picks in the
-  composer always wins. Only on the Claude Code provider.
+  composer always wins, but only one they picked: its source says
+  `explicit`. bb's New task composer sends a model every time (a stored
+  preference says `client-preference`, the default says nothing), and
+  counting those as picks meant no New task ever asked Jev
+  (`ownerPickedModel`). Only on the Claude Code provider.
 - **Never in the way.** One request to TypeSafe, capped at 2 s, no retry.
   After a timeout or an error, nothing is asked for 5 minutes. A failure
   never stops a spawn.
@@ -571,7 +575,10 @@ Jev one question: does this agent need Sonnet or Opus? (`modelroute.ts`)
   none, the reason, Jev's probability and version. Each task, research and
   build cell on the board shows "Sonnet · Jev 0.86" or "Default model", with
   the reason on hover. One line under the board says "Jev model routing: N of
-  M agents on Sonnet" for the last 7 days, or "no key".
+  M agents Jev routed on Sonnet" for the last 7 days, or "no key". M counts
+  only agents Jev was asked about (it answered, or the call failed); the
+  owner's picks, Patches, other providers, no key and the back-off are left
+  out.
 
 ### Watch only
 
@@ -602,13 +609,74 @@ until the project has a row.
 
 ## Headroom (fewer tokens per request)
 
-The Orchestrator's own agents (Patches chats, task, research and build
-threads, in every project) send their requests through Headroom, a local
-proxy that compresses what Claude Code sends (`headroom.ts`). It runs in
-cache mode, so earlier turns stay byte-identical and Claude's prompt cache
-still hits. Sam decided this on 2 Oct 2026. It is off until he starts it
-(`headroom_control start`); the stop is kept in
-`~/.local/share/the-orchestrator/headroom/state.json`.
+Headroom is a local proxy that compresses what Claude Code sends
+(`headroom.ts`). Sam turned it on for The Orchestrator's own agents on 2 Oct
+2026. **It is off for good now** (`OFF_FOR_GOOD`): the beat never installs or
+starts it, no thread is routed, and `headroom_control start` refuses with
+"Headroom stays off: it cannot run without changing tool output". The board
+says "Headroom: off for good (it altered tool output)". The machinery below
+stays, with its tests, for a version that passes the rule.
+
+**The rule.** Everything Claude Code sends that it relies on reaches
+Anthropic byte-identical: every message (tool results and user text
+included) and the `tools` list, with no tool added and no CCR marker.
+
+**What happened on 4 Oct.** Headroom 0.39.1, in cache mode, garbled what
+agents read: words dropped from tool output and reports, "N chars of dense
+machine-generated content elided", "Retrieve more: hash=…" (a verifier's
+report reached its checker as "**133 $TMPDIR 0.7→0.6 only 52/52"). Its
+server-side tool search also added a tool to the request and deferred the
+rest, so Anthropic's tool search handed back a `tool_reference` to its
+injected `headroom_retrieve`, and Claude Code kept it in the chat's history.
+Once Headroom stopped, Anthropic refused every turn of that chat: 400 "Tool
+reference 'headroom_retrieve' not found in available tools". A retry fails
+the same way, and so does compact, because it sends the same history. What
+recovers such a chat is clearing its context and handing it a summary
+written from its bb thread log (`bb thread log`), or a fresh successor; the
+task's dossier state is untouched either way.
+
+**Why off for good.** `headroomproxy.test.ts` runs the installed Headroom
+between a Claude Code-shaped request (35 tools, a tool search's
+`tool_reference`, a long failing vitest log with stack traces, a 3,000-char
+base64 line, repeated lines and a diff, a JSON result, grep output, an agent's
+report) and a stub that answers like Anthropic, non-streaming and SSE, and
+compares what arrives. Headroom is told the upstream is
+`http://api.anthropic.com:<stub port>` with the stub as its HTTP proxy, so it
+behaves as it does in front of the real API and nothing leaves the Mac.
+Each setting tried, and what it still changed:
+
+- Defaults (`--mode cache`): the JSON result became a table
+  (`[150]{durationMs:int,id:int,...}`, 24.6k to 7.7k chars), 30 repeated
+  lines became "... (repeated 30 times)", a tool was added and the rest got
+  `defer_loading`.
+- `--no-ccr`, `--lossless`, `--disable-kompress`,
+  `--disable-kompress-fallback`, `--compressor image`: the same folds.
+- `--protect-tool-results '*'` (every tool): tool results intact on the
+  first turn; on the next, a log seen before became "[↑316L same as msg 6:
+  ...]" (cross-turn dedup, which its default "coding" profile turns on).
+- Plus `HEADROOM_DEDUPE=0` and `HEADROOM_TOOL_SEARCH=0`: every message
+  byte-identical and no tool added, but the `tools` list still comes back
+  sorted, with the whitespace in descriptions collapsed. That pass
+  (`tool_schema_compaction`) runs whenever Headroom optimises at all, and no
+  setting turns it off; only `--no-optimize` does, and then Headroom does
+  nothing.
+
+So the strictest settings (`SAFETY_FLAGS`: `--no-ccr --protect-tool-results
+'*'`; `SAFETY_ENV`: `HEADROOM_TOOL_SEARCH=0 HEADROOM_DEDUPE=0`) are pinned
+in `runArgv`/`runEnv` and the test, and the test asserts the `tools` list is
+the one thing still changed. A pinned version that stops changing it fails
+that test, and only then is `OFF_FOR_GOOD` worth revisiting. Removing any of
+`--protect-tool-results '*'`, `HEADROOM_DEDUPE=0` or `HEADROOM_TOOL_SEARCH=0`
+fails it too. A control run with Headroom's own defaults must change the log
+and add a tool, so a pass is never Headroom failing open (without network it
+cannot fetch its tokenizer and passes everything through; the test gives it
+the copy its venv ships). The second test runs the real relay in front:
+a turn through Headroom, then Headroom killed, then the next turn, with the
+whole history, goes direct and the stub, which refuses any `tool_use` or
+`tool_reference` naming a tool the request does not carry, answers 200. The
+test is skipped where Headroom is not installed.
+
+The rest of this section is how it ran.
 
 What went wrong the first time (2 Oct): the key went into every checkout's
 `.claude/settings.local.json`, main checkouts included, so Sam's own Claude
@@ -687,10 +755,11 @@ it started with, so taking the key out again does not help it. Hence:
   read. A dead relay starts at once; one alive but not answering for two
   beats restarts; an older relay version is replaced only when nothing uses
   it. Stopped: Headroom is stopped if it still runs, the relay as above.
-- **On the board.** One line in the header: "Headroom: on · 1.2M tokens
-  removed (8.6%)" from what compression measurably removed since Headroom
-  started (never its tool-list estimate), or installing, starting, "down,
-  agents go direct (why)", or "off, agents go direct".
+- **On the board.** One line in the header: "Headroom: off for good (it
+  altered tool output)" now. Before: "Headroom: on · 1.2M tokens removed
+  (8.6%)" from what compression measurably removed since Headroom started
+  (never its tool-list estimate), or installing, starting, "down, agents go
+  direct (why)", or "off, agents go direct".
 - **Memory.** Headroom and the relay count in the agent tree budget wherever
   they run, but the guard never kills them.
 - **Another plugin.** bb's own Account Pooler plugin also gives claude-code an

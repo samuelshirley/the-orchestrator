@@ -75,11 +75,13 @@ import {
   HEADROOM_VERSION,
   INSTALL_TIMEOUT_MS,
   NO_RELAY,
+  OFF_FOR_GOOD,
   PROBE_TIMEOUT_MS,
   RELAY_HEALTH_PATH,
   RELAY_PROBE_TIMEOUT_MS,
   RELAY_URL,
   cleanupSettingsText,
+  controlRefusal,
   headroomPaths,
   headroomStep,
   headroomView,
@@ -501,7 +503,7 @@ function headroomOutputView(state: HeadroomState, stats: ReturnType<typeof parse
 }
 
 async function headroomBeat(input: HeadroomBeatInput, signal: AbortSignal): Promise<HeadroomBeatOutput> {
-  const route = () => ({ enabled: !(headroom.state?.stopped ?? true), relayHealthy: headroom.relayUp });
+  const route = () => ({ enabled: OFF_FOR_GOOD === null && !(headroom.state?.stopped ?? true), relayHealthy: headroom.relayUp });
   if (headroom.beating) return { view: headroomOutputView(await headroomState(), null), skipped: [], route: route() };
   headroom.beating = true;
   try {
@@ -574,7 +576,7 @@ async function headroomBeat(input: HeadroomBeatInput, signal: AbortSignal): Prom
  */
 async function headroomRoute(signal: AbortSignal): Promise<{ enabled: boolean; relayHealthy: boolean }> {
   const state = await headroomState();
-  if (state.stopped) return { enabled: false, relayHealthy: false };
+  if (state.stopped || OFF_FOR_GOOD !== null) return { enabled: false, relayHealthy: false };
   const reading = await relayReading(signal, RELAY_PROBE_TIMEOUT_MS);
   return { enabled: true, relayHealthy: reading.healthy };
 }
@@ -590,6 +592,8 @@ async function headroomControl(
   { action, pluginRoot, activeAgentTurns }: { action: "stop" | "start"; pluginRoot: string | null; activeAgentTurns: number },
   signal: AbortSignal,
 ): Promise<{ relayWaits: string | null }> {
+  const refusal = controlRefusal(action);
+  if (refusal !== null) throw new Error(refusal);
   const state = await headroomState();
   if (action === "start") {
     await saveHeadroomState({ ...state, stopped: false, starts: [] });

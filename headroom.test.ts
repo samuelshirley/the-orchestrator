@@ -11,11 +11,17 @@ import {
   INSTALL_RETRY_MS,
   MAX_RSS_BYTES,
   MAX_STARTS,
+  OFF_FOR_GOOD,
+  OFF_FOR_GOOD_REFUSAL,
   OWNER_AFTER_MS,
+  SAFETY_ENV,
+  SAFETY_FLAGS,
   START_WINDOW_MS,
   STARTUP_GRACE_MS,
   agentEnv,
   cleanupSettingsText,
+  controlRefusal,
+  headroomArgs,
   headroomPaths,
   headroomStep,
   headroomView,
@@ -57,9 +63,10 @@ describe("install and run commands", () => {
     expect(steps.flatMap((s) => s.argv).join(" ")).not.toMatch(/\[all\]/);
     expect(paths.dir).toBe("/Users/sam/.local/share/the-orchestrator/headroom");
   });
-  it("binds 127.0.0.1 only, Headroom on 8792 behind the relay on 8791, in cache mode", () => {
+  it("binds 127.0.0.1 only, Headroom on 8792 behind the relay on 8791, in cache mode with the safety flags", () => {
     const argv = runArgv(paths);
-    expect(argv).toEqual([`${paths.dir}/venv/bin/headroom`, "proxy", "--host", "127.0.0.1", "--port", "8792", "--mode", "cache"]);
+    expect(argv).toEqual([`${paths.dir}/venv/bin/headroom`, "proxy", "--host", "127.0.0.1", "--port", "8792", "--mode", "cache", ...SAFETY_FLAGS]);
+    expect(argv.slice(1)).toEqual(headroomArgs(8792));
     expect(argv).not.toContain("0.0.0.0");
     expect(HEADROOM_URL).toBe("http://127.0.0.1:8792");
     expect(RELAY_URL).toBe("http://127.0.0.1:8791");
@@ -76,6 +83,17 @@ describe("install and run commands", () => {
       "8792",
     ]);
     expect(parseRelayArgs(relay.slice(2))).toEqual({ host: "127.0.0.1", port: 8791, headroomPort: 8792 });
+  });
+  it("never touches a tool result, never uses CCR, never runs in token mode", () => {
+    const args = headroomArgs(8792);
+    expect(args).toContain("--no-ccr");
+    expect(args[args.indexOf("--protect-tool-results") + 1]).toBe("*");
+    expect(args).not.toContain("token");
+    expect(args).not.toContain("--anthropic-api-url");
+  });
+  it("turns off cross-turn dedup and server-side tool search, whatever the host's environment says", () => {
+    expect(SAFETY_ENV).toEqual({ HEADROOM_TOOL_SEARCH: "0", HEADROOM_DEDUPE: "0" });
+    expect(runEnv({ HEADROOM_TOOL_SEARCH: "1", HEADROOM_DEDUPE: "1" })).toMatchObject(SAFETY_ENV);
   });
   it("gives the relay PATH and HOME only: no keys, no base URL", () => {
     expect(relayEnv({ PATH: "/usr/bin", HOME: "/Users/sam", ANTHROPIC_API_KEY: "sk-x", JEV_API_KEY: "j", ANTHROPIC_BASE_URL: RELAY_URL })).toEqual({
@@ -173,62 +191,72 @@ const facts = (over: Partial<BeatFacts> = {}): BeatFacts => ({
 const DOWN = parseHealth(null, null);
 
 describe("headroomStep", () => {
+  // The machinery, for a version that passes headroomproxy.test.ts; off for good below.
+  const runningStep = (state: HeadroomState, f: BeatFacts) => headroomStep(state, f, null);
   it("installs when not installed, and after a failure waits an hour", () => {
-    expect(headroomStep(INITIAL_STATE, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "install", up: false });
+    expect(runningStep(INITIAL_STATE, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "install", up: false });
     const failed = { ...INITIAL_STATE, installFailedAt: NOW - 1000, installError: "no network" };
-    expect(headroomStep(failed, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "none", up: false });
-    expect(headroomStep(failed, facts({ installed: false, pid: null, health: DOWN, now: NOW - 1000 + INSTALL_RETRY_MS })).action).toBe("install");
+    expect(runningStep(failed, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "none", up: false });
+    expect(runningStep(failed, facts({ installed: false, pid: null, health: DOWN, now: NOW - 1000 + INSTALL_RETRY_MS })).action).toBe("install");
   });
   it("does nothing while installing, and routes nothing", () => {
-    expect(headroomStep(INITIAL_STATE, facts({ installed: false, installing: true, pid: null, health: DOWN }))).toMatchObject({ action: "none", up: false });
+    expect(runningStep(INITIAL_STATE, facts({ installed: false, installing: true, pid: null, health: DOWN }))).toMatchObject({ action: "none", up: false });
   });
   it("starts an installed proxy that is not running", () => {
-    const step = headroomStep(INITIAL_STATE, facts({ pid: null, health: DOWN }));
+    const step = runningStep(INITIAL_STATE, facts({ pid: null, health: DOWN }));
     expect(step).toMatchObject({ action: "start", up: false });
     expect(step.state.starts).toEqual([NOW]);
   });
   it("routes only while healthy", () => {
-    expect(headroomStep(INITIAL_STATE, facts())).toMatchObject({ action: "none", up: true });
-    expect(headroomStep(INITIAL_STATE, facts({ health: { healthy: false, reason: "x", pid: 4242 } })).up).toBe(false);
+    expect(runningStep(INITIAL_STATE, facts())).toMatchObject({ action: "none", up: true });
+    expect(runningStep(INITIAL_STATE, facts({ health: { healthy: false, reason: "x", pid: 4242 } })).up).toBe(false);
   });
   it("restarts after two unhealthy beats in a row, not one, and not while it is still starting", () => {
     const sick = { healthy: false as const, reason: "health check answered HTTP 500", pid: 4242 };
-    const one = headroomStep(INITIAL_STATE, facts({ health: sick }));
+    const one = runningStep(INITIAL_STATE, facts({ health: sick }));
     expect(one).toMatchObject({ action: "none", up: false });
-    expect(headroomStep(one.state, facts({ health: sick, now: NOW + 30_000 })).action).toBe("restart");
+    expect(runningStep(one.state, facts({ health: sick, now: NOW + 30_000 })).action).toBe("restart");
     const justStarted = { ...INITIAL_STATE, starts: [NOW - STARTUP_GRACE_MS + 1] };
-    const a = headroomStep(justStarted, facts({ health: sick }));
-    expect(headroomStep(a.state, facts({ health: sick })).action).toBe("none");
+    const a = runningStep(justStarted, facts({ health: sick }));
+    expect(runningStep(a.state, facts({ health: sick })).action).toBe("none");
     // A healthy beat in between resets the count.
-    const healed = headroomStep(one.state, facts());
-    expect(headroomStep(healed.state, facts({ health: sick })).action).toBe("none");
+    const healed = runningStep(one.state, facts());
+    expect(runningStep(healed.state, facts({ health: sick })).action).toBe("none");
   });
   it(`restarts a proxy over ${MAX_RSS_BYTES / 1024 ** 3} GB, routing off meanwhile`, () => {
-    expect(headroomStep(INITIAL_STATE, facts({ rssBytes: MAX_RSS_BYTES })).action).toBe("none");
-    expect(headroomStep(INITIAL_STATE, facts({ rssBytes: MAX_RSS_BYTES + 1 }))).toMatchObject({ action: "restart", up: false });
+    expect(runningStep(INITIAL_STATE, facts({ rssBytes: MAX_RSS_BYTES })).action).toBe("none");
+    expect(runningStep(INITIAL_STATE, facts({ rssBytes: MAX_RSS_BYTES + 1 }))).toMatchObject({ action: "restart", up: false });
   });
   it(`starts at most ${MAX_STARTS} times in ${START_WINDOW_MS / 60_000} min, then stays down`, () => {
     let state: HeadroomState = INITIAL_STATE;
     let now = NOW;
     const actions: string[] = [];
     for (let i = 0; i < 6; i += 1) {
-      const step = headroomStep(state, facts({ pid: null, health: DOWN, now }));
+      const step = runningStep(state, facts({ pid: null, health: DOWN, now }));
       actions.push(step.action);
       state = step.state;
       now += 60_000;
     }
     expect(actions).toEqual(["start", "start", "start", "start", "none", "none"]);
     expect(state.reason).toMatch(/staying down/);
-    expect(headroomStep(state, facts({ pid: null, health: DOWN, now: NOW + START_WINDOW_MS })).action).toBe("start");
+    expect(runningStep(state, facts({ pid: null, health: DOWN, now: NOW + START_WINDOW_MS })).action).toBe("start");
   });
   it("is off when stopped, whatever it sees", () => {
     const stopped = { ...INITIAL_STATE, stopped: true };
-    expect(headroomStep(stopped, facts())).toMatchObject({ action: "none", up: false });
-    expect(headroomStep(stopped, facts({ installed: false, pid: null, health: DOWN })).action).toBe("none");
+    expect(runningStep(stopped, facts())).toMatchObject({ action: "none", up: false });
+    expect(runningStep(stopped, facts({ installed: false, pid: null, health: DOWN })).action).toBe("none");
+  });
+  it("off for good: never installs, starts or routes, and counts as stopped, whatever it sees", () => {
+    expect(OFF_FOR_GOOD).toBe("it altered tool output");
+    for (const f of [facts(), facts({ installed: false, pid: null, health: DOWN }), facts({ pid: null, health: DOWN }), facts({ rssBytes: MAX_RSS_BYTES + 1 })]) {
+      const step = headroomStep(INITIAL_STATE, f);
+      expect(step).toMatchObject({ action: "none", up: false });
+      expect(step.state.stopped).toBe(true);
+    }
   });
   it("forgets an old install failure once installed", () => {
     const failed = { ...INITIAL_STATE, installFailedAt: NOW - 5, installError: "x" };
-    expect(headroomStep(failed, facts()).state).toMatchObject({ installFailedAt: null, installError: null });
+    expect(runningStep(failed, facts()).state).toMatchObject({ installFailedAt: null, installError: null });
   });
 });
 
@@ -321,27 +349,31 @@ describe("no settings file is ever routed", () => {
 });
 
 describe("agentEnv", () => {
+  it("off for good: routes no thread, however healthy the relay", () => {
+    const fresh = { enabled: true, relayHealthy: true, at: NOW };
+    expect(agentEnv({ agent: true, reading: fresh, now: NOW })).toEqual([]);
+  });
   const fresh = { enabled: true, relayHealthy: true, at: NOW - 1_000 };
   it("routes an Orchestrator agent thread through the relay while enabled and the relay answered", () => {
-    expect(agentEnv({ agent: true, reading: fresh, now: NOW })).toEqual([
+    expect(agentEnv({ offForGood: null, agent: true, reading: fresh, now: NOW })).toEqual([
       { name: "ANTHROPIC_BASE_URL", value: "http://127.0.0.1:8791", reason: expect.stringContaining("relay") },
     ]);
   });
   it("gives an unknown thread (the owner's own session) nothing", () => {
-    expect(agentEnv({ agent: false, reading: fresh, now: NOW })).toEqual([]);
+    expect(agentEnv({ offForGood: null, agent: false, reading: fresh, now: NOW })).toEqual([]);
   });
   it("gives nothing when stopped, when the relay is down, or with no reading", () => {
-    expect(agentEnv({ agent: true, reading: { ...fresh, enabled: false }, now: NOW })).toEqual([]);
-    expect(agentEnv({ agent: true, reading: { ...fresh, relayHealthy: false }, now: NOW })).toEqual([]);
-    expect(agentEnv({ agent: true, reading: null, now: NOW })).toEqual([]);
+    expect(agentEnv({ offForGood: null, agent: true, reading: { ...fresh, enabled: false }, now: NOW })).toEqual([]);
+    expect(agentEnv({ offForGood: null, agent: true, reading: { ...fresh, relayHealthy: false }, now: NOW })).toEqual([]);
+    expect(agentEnv({ offForGood: null, agent: true, reading: null, now: NOW })).toEqual([]);
   });
   it(`gives nothing on a reading older than ${ROUTE_FRESH_MS / 1000} s, or one from the future`, () => {
-    expect(agentEnv({ agent: true, reading: { ...fresh, at: NOW - ROUTE_FRESH_MS }, now: NOW })).toHaveLength(1);
-    expect(agentEnv({ agent: true, reading: { ...fresh, at: NOW - ROUTE_FRESH_MS - 1 }, now: NOW })).toEqual([]);
-    expect(agentEnv({ agent: true, reading: { ...fresh, at: NOW + 60_000 }, now: NOW })).toEqual([]);
+    expect(agentEnv({ offForGood: null, agent: true, reading: { ...fresh, at: NOW - ROUTE_FRESH_MS }, now: NOW })).toHaveLength(1);
+    expect(agentEnv({ offForGood: null, agent: true, reading: { ...fresh, at: NOW - ROUTE_FRESH_MS - 1 }, now: NOW })).toEqual([]);
+    expect(agentEnv({ offForGood: null, agent: true, reading: { ...fresh, at: NOW + 60_000 }, now: NOW })).toEqual([]);
   });
   it("never names Headroom's own port: agents only ever see the relay", () => {
-    expect(JSON.stringify(agentEnv({ agent: true, reading: fresh, now: NOW }))).not.toContain(":8792");
+    expect(JSON.stringify(agentEnv({ offForGood: null, agent: true, reading: fresh, now: NOW }))).not.toContain(":8792");
   });
 });
 
@@ -419,12 +451,25 @@ describe("stopPlan", () => {
 });
 
 describe("headroomView", () => {
+  it("off for good: says so, whatever the state, and never needs the owner", () => {
+    const down = { ...INITIAL_STATE, starts: Array.from({ length: MAX_STARTS }, (_, i) => NOW - i * 1000), reason: "staying down", downSince: NOW - OWNER_AFTER_MS - 1 };
+    for (const state of [INITIAL_STATE, { ...INITIAL_STATE, stopped: true }, down]) {
+      expect(headroomView({ state, up: true, relayUp: false, relayNote: null, stats: null, now: NOW, paths })).toEqual({
+        state: "off",
+        line: "Headroom: off for good (it altered tool output)",
+        needsOwner: null,
+      });
+    }
+    expect(headroomView({ state: INITIAL_STATE, up: false, relayUp: true, relayNote: "waiting for 1 agent turn to finish", stats: null, now: NOW, paths }).line).toBe(
+      "Headroom: off for good (it altered tool output) (the relay stays up, waiting for 1 agent turn to finish)",
+    );
+  });
   const view = (state: HeadroomState, up = false, now = NOW, relayUp = true, relayNote: string | null = null) =>
-    headroomView({ state, up, relayUp, relayNote, stats: up ? { tokensRemoved: 1_234_567, tokensBefore: 14_355_430, requests: 9 } : null, now, paths });
+    headroomView({ state, up, relayUp, relayNote, offForGood: null, stats: up ? { tokensRemoved: 1_234_567, tokensBefore: 14_355_430, requests: 9 } : null, now, paths });
   it("says on, with the measured tokens removed and their share", () => {
     expect(view(INITIAL_STATE, true).line).toBe("Headroom: on · 1.2M tokens removed (8.6%)");
     expect(
-      headroomView({ state: INITIAL_STATE, up: true, relayUp: true, relayNote: null, stats: { tokensRemoved: 900, tokensBefore: null, requests: null }, now: NOW, paths }).line,
+      headroomView({ state: INITIAL_STATE, up: true, relayUp: true, relayNote: null, offForGood: null, stats: { tokensRemoved: 900, tokensBefore: null, requests: null }, now: NOW, paths }).line,
     ).toBe("Headroom: on · 900 tokens removed");
   });
   it("says installing, starting, off, or down with the reason", () => {
@@ -446,5 +491,14 @@ describe("headroomView", () => {
     expect(view({ ...capped, starts: [NOW] }).needsOwner).toBeNull();
     const installFailed = { ...INITIAL_STATE, installFailedAt: NOW - 10, installError: "x", reason: "install failed: x", downSince: NOW - OWNER_AFTER_MS - 1 };
     expect(view(installFailed).needsOwner?.command).toBe(`tail -n 100 ${paths.installLog}`);
+  });
+});
+
+describe("controlRefusal", () => {
+  it("off for good: start refuses, stop goes through", () => {
+    expect(controlRefusal("start")).toBe(OFF_FOR_GOOD_REFUSAL);
+    expect(OFF_FOR_GOOD_REFUSAL).toBe("Headroom stays off: it cannot run without changing tool output");
+    expect(controlRefusal("stop")).toBeNull();
+    expect(controlRefusal("start", null)).toBeNull();
   });
 });

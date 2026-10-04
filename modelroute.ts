@@ -251,12 +251,12 @@ export function routeSkip(input: { role: RouteRole; ownerModel: boolean; provide
 }
 
 /**
- * The owner's composer model wins over Jev: when its source says explicit,
- * or a model came with no source to say otherwise.
+ * The owner's composer model wins over Jev only when its source says
+ * explicit: they touched the picker. bb's composer always sends a model;
+ * a stored preference says "client-preference", the default says nothing.
  */
 export function ownerPickedModel(execution: { model?: string; executionInputSources?: { model?: "client-preference" | "explicit" } }): boolean {
-  if (execution.executionInputSources?.model === "explicit") return true;
-  return execution.model !== undefined && execution.executionInputSources?.model === undefined;
+  return execution.executionInputSources?.model === "explicit";
 }
 
 /** The decision from Jev's reply: Sonnet only on a confident "sonnet". */
@@ -337,14 +337,22 @@ export function routeTooltip(route: { reason: string; probability: number | null
   }
 }
 
-/** The board's one line: routed agents of the last 7 days, or why there is no routing. */
+/** The reasons of agents Jev was asked about (it answered, or the call failed). */
+const ASKED: ReadonlySet<string> = new Set<RouteReason>(["sonnet", "opus", "unsure", "error", "timeout"]);
+
+/**
+ * The board's one line: of the agents Jev was asked about in the last 7
+ * days, how many it put on Sonnet; or why there is no routing. Agents it was
+ * never asked about (the owner's pick, Patches, another provider, no key,
+ * the back-off) are not counted.
+ */
 export function routingLine(
-  rows: readonly { routedAt: number; model: string | null }[],
+  rows: readonly { routedAt: number; model: string | null; reason: string }[],
   now: number,
   key: { present: true } | { present: false; problem: KeyProblem },
 ): string {
   if (!key.present) return key.problem === "open" ? "Jev model routing: off (jev.env is readable by others)" : "Jev model routing: no key";
-  const recent = rows.filter((row) => now - row.routedAt < ROUTE_WINDOW_MS);
-  const sonnet = recent.filter((row) => row.model !== null).length;
-  return `Jev model routing: ${sonnet} of ${recent.length} ${recent.length === 1 ? "agent" : "agents"} on Sonnet`;
+  const asked = rows.filter((row) => now - row.routedAt < ROUTE_WINDOW_MS && ASKED.has(row.reason));
+  const sonnet = asked.filter((row) => row.reason === "sonnet" && row.model !== null).length;
+  return `Jev model routing: ${sonnet} of ${asked.length} ${asked.length === 1 ? "agent" : "agents"} Jev routed on Sonnet`;
 }

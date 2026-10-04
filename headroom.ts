@@ -33,8 +33,13 @@
 //     MAX_RSS_BYTES, at most MAX_STARTS starts per START_WINDOW_MS. Past
 //     that it stays down (the relay goes direct), and after OWNER_AFTER_MS
 //     down it is one Needs you item with the log path.
-//   - Cache mode keeps earlier turns byte-identical, so Claude's prompt
-//     cache still hits.
+//   - Never change what Claude Code sends (tool results, user messages, the
+//     tools list) and never add a tool. Headroom 0.39.1 cannot run that way:
+//     with every flag that leaves it anything to do it still rewrites the
+//     tools list (headroomproxy.test.ts). So it is off for good
+//     (OFF_FOR_GOOD): the beat never starts it, start refuses, no thread is
+//     routed. The machinery stays, pinned by its tests, for a version that
+//     passes headroomproxy.test.ts.
 
 import { RELAY_HEALTH_PATH, RELAY_VERSION, relayArgs } from "./headroomrelay.js";
 
@@ -143,8 +148,50 @@ export function installSteps(paths: HeadroomPaths, systemPython = "python3"): Co
   ];
 }
 
+/**
+ * Why Headroom stays off, or null once a pinned version passes
+ * headroomproxy.test.ts. On 4 Oct 2026 0.39.1 garbled agents' tool output and
+ * reports, and put a headroom_retrieve tool reference into a chat's history
+ * that jammed every later turn once Headroom stopped (400 "Tool reference
+ * 'headroom_retrieve' not found in available tools").
+ */
+export const OFF_FOR_GOOD: string | null = "it altered tool output";
+export const OFF_FOR_GOOD_REFUSAL = "Headroom stays off: it cannot run without changing tool output";
+
+/**
+ * The strictest settings 0.39.1 has. Each of these fails
+ * headroomproxy.test.ts when removed: every tool's results protected ('*';
+ * without it a failing-test log loses its repeated lines to "... (repeated
+ * 30 times)"), and, in SAFETY_ENV, its default "coding" savings profile's
+ * cross-turn dedup (a log seen before becomes "[↑316L same as msg 6: ...]")
+ * and server-side tool search (it adds a tool_search tool and defers the
+ * others, which is how a tool_reference to headroom_retrieve got into a
+ * chat's history on 4 Oct). --no-ccr (no retrieval markers, no
+ * headroom_retrieve tool) is kept against that tool though the test cannot
+ * show it: with nothing compressed there is nothing to retrieve. Even so,
+ * whenever it optimises at all it sorts the tools list and collapses the
+ * whitespace in tool descriptions (proxy/tool_schema_compaction.py, no
+ * setting), so OFF_FOR_GOOD holds; only --no-optimize keeps the request
+ * intact, and then Headroom has nothing left to do.
+ */
+export const SAFETY_FLAGS: readonly string[] = ["--no-ccr", "--protect-tool-results", "*"];
+export const SAFETY_ENV: Readonly<Record<string, string>> = {
+  HEADROOM_TOOL_SEARCH: "0",
+  HEADROOM_DEDUPE: "0",
+};
+
+/** Headroom's argv after the binary (runArgv; headroomproxy.test.ts runs the same). */
+export function headroomArgs(port: number): string[] {
+  return ["proxy", "--host", HEADROOM_HOST, "--port", String(port), "--mode", "cache", ...SAFETY_FLAGS];
+}
+
 export function runArgv(paths: HeadroomPaths): string[] {
-  return [paths.bin, "proxy", "--host", HEADROOM_HOST, "--port", String(HEADROOM_PORT), "--mode", "cache"];
+  return [paths.bin, ...headroomArgs(HEADROOM_PORT)];
+}
+
+/** headroom_control: why it refuses, or null. Stop always goes through. */
+export function controlRefusal(action: "start" | "stop", offForGood: string | null = OFF_FOR_GOOD): string | null {
+  return action === "start" && offForGood !== null ? OFF_FOR_GOOD_REFUSAL : null;
 }
 
 /** The relay's command: node on the copied script, 127.0.0.1 only, in front of Headroom's port. */
@@ -154,14 +201,14 @@ export function relayArgv(paths: HeadroomPaths, node: string): string[] {
 
 /**
  * The proxy's environment: the host's, minus a base URL pointing at the
- * relay or the proxy (it would call itself), with the privacy keys last so
- * nothing turns them back on.
+ * relay or the proxy (it would call itself), with the safety and privacy
+ * keys last so nothing turns them back on.
  */
 export function runEnv(base: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(base)) if (value !== undefined) env[key] = value;
   if (isOurUrl(env[BASE_URL_KEY])) delete env[BASE_URL_KEY];
-  return { ...env, ...PRIVACY_ENV };
+  return { ...env, ...SAFETY_ENV, ...PRIVACY_ENV };
 }
 
 /** The relay's environment: PATH and HOME only; it needs nothing else and is given no secrets. */
@@ -316,11 +363,11 @@ function down(state: HeadroomState, now: number, reason: string): HeadroomState 
   return { ...state, downSince: state.downSince ?? now, reason };
 }
 
-/** The decision for one liveness beat. */
-export function headroomStep(state: HeadroomState, facts: BeatFacts): BeatDecision {
+/** The decision for one liveness beat. Off for good is stopped, whatever the state file says. */
+export function headroomStep(state: HeadroomState, facts: BeatFacts, offForGood: string | null = OFF_FOR_GOOD): BeatDecision {
   const { now } = facts;
   const starts = state.starts.filter((at) => now - at < START_WINDOW_MS);
-  const base = { ...state, starts };
+  const base = { ...state, starts, stopped: state.stopped || offForGood !== null };
   const canStart = starts.length < MAX_STARTS;
   const capped = (s: HeadroomState): BeatDecision => ({
     action: "none",
@@ -333,7 +380,7 @@ export function headroomStep(state: HeadroomState, facts: BeatFacts): BeatDecisi
     state: { ...down(s, now, reason), starts: [...s.starts, now], unhealthyBeats: 0 },
   });
 
-  if (state.stopped) return { action: "none", up: false, state: { ...base, unhealthyBeats: 0, downSince: null, reason: "stopped" } };
+  if (base.stopped) return { action: "none", up: false, state: { ...base, unhealthyBeats: 0, downSince: null, reason: "stopped" } };
   if (facts.installing) return { action: "none", up: false, state: down(base, now, "installing") };
   if (!facts.installed) {
     if (state.installFailedAt !== null && now - state.installFailedAt < INSTALL_RETRY_MS) {
@@ -474,7 +521,8 @@ export function routeFresh(reading: RouteReading | null, now: number): reading i
  * stopped and the relay answered in the last ROUTE_FRESH_MS. Anything else,
  * the owner's own sessions first, gets nothing and goes direct.
  */
-export function agentEnv(args: { agent: boolean; reading: RouteReading | null; now: number }): EnvEntry[] {
+export function agentEnv(args: { agent: boolean; reading: RouteReading | null; now: number; offForGood?: string | null }): EnvEntry[] {
+  if ((args.offForGood === undefined ? OFF_FOR_GOOD : args.offForGood) !== null) return [];
   if (!args.agent || !routeFresh(args.reading, args.now)) return [];
   if (!args.reading.enabled || !args.reading.relayHealthy) return [];
   return [{ name: BASE_URL_KEY, value: RELAY_URL, reason: "The Orchestrator's Headroom relay (fewer tokens; goes direct when Headroom is down)" }];
@@ -562,8 +610,14 @@ export function headroomView(args: {
   stats: Stats | null;
   now: number;
   paths: HeadroomPaths;
+  offForGood?: string | null;
 }): HeadroomView {
   const { state, up, relayUp, relayNote, stats, now, paths } = args;
+  const offForGood = args.offForGood === undefined ? OFF_FOR_GOOD : args.offForGood;
+  if (offForGood !== null) {
+    const relay = relayUp ? ` (the relay stays up, ${relayNote ?? "until nothing uses it"})` : "";
+    return { state: "off", line: `Headroom: off for good (${offForGood})${relay}`, needsOwner: null };
+  }
   if (state.stopped) {
     const relay = relayUp ? ` (the relay stays up, ${relayNote ?? "until nothing uses it"})` : "";
     return { state: "off", line: `Headroom: off, agents go direct${relay}`, needsOwner: null };

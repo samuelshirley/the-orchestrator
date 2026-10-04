@@ -212,9 +212,11 @@ describe("who is routed", () => {
     expect(routeSkip({ role: "build", ownerModel: false, providerId: undefined })).toBe("provider");
   });
 
-  it("reads the composer's explicit model", () => {
+  it("counts only a model the owner picked in the composer, not the one it always sends", () => {
     expect(ownerPickedModel({ model: "opus", executionInputSources: { model: "explicit" } })).toBe(true);
-    expect(ownerPickedModel({ model: "opus" })).toBe(true);
+    // bb's New task composer sends a model every time; no source means the default, so Jev is asked.
+    expect(ownerPickedModel({ model: "opus" })).toBe(false);
+    expect(ownerPickedModel({ model: "opus", executionInputSources: {} })).toBe(false);
     expect(ownerPickedModel({ model: "opus", executionInputSources: { model: "client-preference" } })).toBe(false);
     expect(ownerPickedModel({})).toBe(false);
   });
@@ -319,13 +321,23 @@ describe("board words", () => {
   it("counts the last 7 days, or says there is no key", () => {
     const now = ROUTE_WINDOW_MS * 2;
     const rows = [
-      { routedAt: now - 1000, model: SONNET_MODEL },
-      { routedAt: now - 2000, model: null },
-      { routedAt: now - ROUTE_WINDOW_MS - 1, model: SONNET_MODEL },
+      { routedAt: now - 1000, model: SONNET_MODEL, reason: "sonnet" },
+      { routedAt: now - 2000, model: null, reason: "opus" },
+      { routedAt: now - ROUTE_WINDOW_MS - 1, model: SONNET_MODEL, reason: "sonnet" },
     ];
-    expect(routingLine(rows, now, { present: true })).toBe("Jev model routing: 1 of 2 agents on Sonnet");
-    expect(routingLine([], now, { present: true })).toBe("Jev model routing: 0 of 0 agents on Sonnet");
+    expect(routingLine(rows, now, { present: true })).toBe("Jev model routing: 1 of 2 agents Jev routed on Sonnet");
+    expect(routingLine([], now, { present: true })).toBe("Jev model routing: 0 of 0 agents Jev routed on Sonnet");
     expect(routingLine(rows, now, { present: false, problem: "missing" })).toBe("Jev model routing: no key");
     expect(routingLine(rows, now, { present: false, problem: "open" })).toContain("readable by others");
+  });
+
+  it("counts only agents Jev was asked about", () => {
+    const now = ROUTE_WINDOW_MS * 2;
+    const at = now - 1000;
+    const asked = ["sonnet", "opus", "unsure", "error", "timeout"].map((reason) => ({ routedAt: at, model: reason === "sonnet" ? SONNET_MODEL : null, reason }));
+    const notAsked = ["owner", "patches", "provider", "no-key", "key-open", "backoff"].map((reason) => ({ routedAt: at, model: null, reason }));
+    expect(routingLine([...asked, ...notAsked], now, { present: true })).toBe("Jev model routing: 1 of 5 agents Jev routed on Sonnet");
+    expect(routingLine(notAsked, now, { present: true })).toBe("Jev model routing: 0 of 0 agents Jev routed on Sonnet");
+    expect(routingLine([asked[0]!], now, { present: true })).toBe("Jev model routing: 1 of 1 agent Jev routed on Sonnet");
   });
 });

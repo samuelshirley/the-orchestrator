@@ -119,8 +119,19 @@ what must not break.
   at most 3 tabs of its own, released when its pass ends. Builders: no browser.
 - `memwatch.sh` is the backstop outside bb: it kills the largest process in
   bb's tree before the Mac runs out, and logs to `.memwatch/`.
-- Headroom (`headroom.ts`, `headroomrelay.ts`, host beat): per thread, never
-  through a settings file. bb's provider env (`experimental_contributeEnv`,
+- Headroom is off for good (`OFF_FOR_GOOD`): what Claude Code sends (every
+  message, tool results and user text included, and the tools list) must
+  reach Anthropic byte-identical, no tool added, no CCR marker, and 0.39.1
+  cannot: even with its strictest settings (`SAFETY_FLAGS`, `SAFETY_ENV`) it
+  sorts and compacts the tools list. `headroomproxy.test.ts` runs the real
+  proxy against a stub Anthropic and says so; it also checks a turn after
+  Headroom stops still works. The beat never starts it, start refuses, the
+  board says "off for good". On 4 Oct it garbled agents' tool output, and a
+  `tool_reference` to its `headroom_retrieve` left in a chat's history got
+  every later turn refused (400) once it stopped; compact resends that
+  history and fails too, so such a chat is recovered by clearing its context
+  with a summary from its bb thread log, or a successor. How it ran: per
+  thread, never through a settings file. bb's provider env (`experimental_contributeEnv`,
   server.ts) gives `ANTHROPIC_BASE_URL=http://127.0.0.1:8791` only to a
   Patches chat, task, research or build thread, only while not stopped and
   the relay answered within 10 s; the owner's own sessions get nothing. 8791
@@ -130,7 +141,7 @@ what must not break.
   active. Kills only verified pids (ps matchers). Beacon and telemetry off,
   127.0.0.1 only, pinned version; both counted in the agent tree budget,
   never killed by it. If the relay itself dies, routed calls fail until the
-  next beat restarts it (up to 30 s). Off until the owner starts it.
+  next beat restarts it (up to 30 s).
 - Jev steers one thing: the model of task, research and build agents
   (`modelroute.ts`), through TypeSafe with `JEV_API_KEY` from
   `~/.config/the-orchestrator/jev.env` if that file exists, else The
@@ -139,7 +150,9 @@ what must not break.
   others can read is refused (the board names it: `chmod 600 <path>`), and
   so is a repo `.env` git tracks. Sonnet only when Jev says sonnet at
   0.7 or more; anything else, or any failure, passes no model (the provider
-  default). Patches never; the owner's composer pick wins. What is sent is
+  default). Patches never; the owner's composer pick wins, but only one
+  whose source says `explicit` (bb's composer always sends a model). The
+  board's "N of M" counts only agents Jev was asked about. What is sent is
   scrubbed first. Its kind/tier questions stay watch-only (`jevwatch.ts`):
   asked in the background with a 2 s cap, logged next to what happened, never
   change behaviour. The box is paused in this repo: nothing installed, nothing
