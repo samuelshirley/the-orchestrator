@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { JEV_KEY_DISPLAY, KEY_REREAD_MS, TYPESAFE_BASE_URL, keyFromFile, keyProblemText, keyStale, typesafeConfig } from "./typesafe";
+import { JEV_KEY_DISPLAY, KEY_REREAD_MS, TYPESAFE_BASE_URL, jevKey, keyFromFile, keyProblemText, keyStale, repoEnvPath, typesafeConfig } from "./typesafe";
 
 describe("typesafeConfig", () => {
   it("reads JEV_API_KEY, with export and quotes, last line wins", () => {
@@ -52,6 +52,66 @@ describe("keyFromFile", () => {
     expect(keyProblemText("open")).toContain("readable by others");
     expect(keyProblemText("missing")).toContain(JEV_KEY_DISPLAY);
     expect(JEV_KEY_DISPLAY).toBe("~/.config/the-orchestrator/jev.env");
+  });
+});
+
+describe("jevKey: jev.env, else The Orchestrator repo's .env", () => {
+  const REPO = "/Users/me/Documents/Github/the-orchestrator";
+  const repoPath = `${REPO}/.env`;
+  const good = { text: "OTHER=1\nJEV_API_KEY=from-repo\n", mode: 0o100600, tracked: false };
+  const config = (key: string) => ({ baseUrl: TYPESAFE_BASE_URL, key, model: "jev-latest" });
+
+  it("finds the repo .env only in a main checkout, never a worktree", () => {
+    expect(repoEnvPath(REPO)).toBe(repoPath);
+    expect(repoEnvPath(`${REPO}/`)).toBe(repoPath);
+    expect(repoEnvPath(`${REPO}/.claude/worktrees/x`)).toBeNull();
+    expect(repoEnvPath(`${REPO}/.claude/worktrees`)).toBeNull();
+    expect(repoEnvPath("relative/the-orchestrator")).toBeNull();
+    expect(repoEnvPath(`${REPO}/../elsewhere`)).toBeNull();
+    expect(repoEnvPath(null)).toBeNull();
+  });
+
+  it("takes jev.env first when it is there", () => {
+    expect(jevKey({ home: { text: "JEV_API_KEY=from-home", mode: 0o600 }, repo: good, repoPath })).toEqual({
+      ok: true,
+      config: config("from-home"),
+      file: JEV_KEY_DISPLAY,
+    });
+    // jev.env alone decides once it is there: open or keyless, the repo .env is not a fallback.
+    expect(jevKey({ home: { text: "JEV_API_KEY=from-home", mode: 0o644 }, repo: good, repoPath })).toEqual({ ok: false, problem: "open", file: JEV_KEY_DISPLAY });
+    expect(jevKey({ home: { text: "NOPE=1", mode: 0o600 }, repo: good, repoPath })).toEqual({ ok: false, problem: "missing", file: JEV_KEY_DISPLAY });
+  });
+
+  it("takes the repo .env when jev.env is not there", () => {
+    expect(jevKey({ home: null, repo: good, repoPath })).toEqual({ ok: true, config: config("from-repo"), file: repoPath });
+  });
+
+  it("refuses a repo .env git tracks, or one it could not check, key or not", () => {
+    expect(jevKey({ home: null, repo: { ...good, tracked: true }, repoPath })).toEqual({ ok: false, problem: "tracked", file: repoPath });
+    expect(jevKey({ home: null, repo: { ...good, tracked: null }, repoPath })).toEqual({ ok: false, problem: "tracked", file: repoPath });
+  });
+
+  it("refuses a repo .env group or others can read", () => {
+    for (const mode of [0o644, 0o640, 0o604, 0o100660]) {
+      expect(jevKey({ home: null, repo: { ...good, mode }, repoPath })).toEqual({ ok: false, problem: "open", file: repoPath });
+    }
+  });
+
+  it("has no key when neither file is there, or the repo .env has no line", () => {
+    expect(jevKey({ home: null, repo: null, repoPath })).toEqual({ ok: false, problem: "missing", file: null });
+    expect(jevKey({ home: null, repo: null, repoPath: null })).toEqual({ ok: false, problem: "missing", file: null });
+    expect(jevKey({ home: null, repo: { ...good, text: "OTHER=1" }, repoPath })).toEqual({ ok: false, problem: "missing", file: repoPath });
+  });
+
+  it("names the file and what to do on the board, never the key", () => {
+    expect(keyProblemText("open", repoPath)).toBe(`${repoPath} is readable by others, so its key is not used: chmod 600 ${repoPath}`);
+    expect(keyProblemText("open", JEV_KEY_DISPLAY)).toContain(`chmod 600 ${JEV_KEY_DISPLAY}`);
+    expect(keyProblemText("open", "/Users/me/My Repo/.env")).toContain("chmod 600 '/Users/me/My Repo/.env'");
+    expect(keyProblemText("tracked", repoPath)).toContain(`git tracks ${repoPath}`);
+    expect(keyProblemText("missing", null)).toContain("The Orchestrator's .env");
+    expect(keyProblemText("missing", repoPath)).toBe(`No JEV_API_KEY in ${repoPath}.`);
+    const reading = jevKey({ home: null, repo: { ...good, mode: 0o644 }, repoPath });
+    expect(JSON.stringify(reading)).not.toContain("from-repo");
   });
 });
 

@@ -13,7 +13,7 @@ import {
   repoOf,
   type GuardContext,
 } from "./builderguard";
-import { HEADROOM_URL, applyRouting, routeSettingsText } from "./headroom";
+import { LEGACY_SETTINGS_URL, withoutLegacyRoute } from "./headroom";
 
 const REPO = "/Users/me/Github/app";
 const WT = `${REPO}/.claude/worktrees/x`;
@@ -335,18 +335,16 @@ describe("builderSettings", () => {
     expect(builderSettings(["junk"], options)).toEqual(builderSettings({}, options));
   });
 
-  it("keeps Headroom's routing, and routing keeps the guard (host prepareWorktree, headroom.ts)", () => {
+  it("never routes through Headroom, and a reused worktree loses the first version's key (host writeBuilderGuard)", () => {
     const guarded = builderSettings({}, options);
-    const routed = applyRouting(guarded, true) as Record<string, unknown>;
-    expect(routed.env).toEqual({ ANTHROPIC_BASE_URL: HEADROOM_URL });
-    // Re-guarding a routed worktree keeps the route…
-    expect(builderSettings(routed, options)).toEqual(routed);
-    // …and the beat's on/off never touches the guard's keys.
-    const off = routeSettingsText(JSON.stringify(routed), false);
-    expect(off.action === "write" ? JSON.parse(off.text) : off).toEqual(guarded);
-    const owner = builderSettings({ env: { ANTHROPIC_BASE_URL: "https://gw.example.com" } }, options);
-    expect(applyRouting(owner, true)).toBeNull();
-    expect(applyRouting(owner, false)).toBeNull();
+    expect(JSON.stringify(guarded)).not.toContain("ANTHROPIC_BASE_URL");
+    // A worktree the first version routed: the key goes, the guard is the same.
+    const legacy = { ...guarded, env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL } };
+    expect(builderSettings(withoutLegacyRoute(legacy) ?? legacy, options)).toEqual(guarded);
+    // An owner-set gateway is kept.
+    const owner = { env: { ANTHROPIC_BASE_URL: "https://gw.example.com" } };
+    expect(withoutLegacyRoute(owner)).toBeNull();
+    expect((builderSettings(owner, options).env as Record<string, string>).ANTHROPIC_BASE_URL).toBe("https://gw.example.com");
   });
 });
 

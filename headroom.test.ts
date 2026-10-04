@@ -1,28 +1,45 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
+  BASE_URL_KEY,
   HEADROOM_URL,
   INITIAL_STATE,
+  LEGACY_SETTINGS_URL,
+  NO_RELAY,
+  RELAY_URL,
+  ROUTE_FRESH_MS,
   INSTALL_RETRY_MS,
   MAX_RSS_BYTES,
   MAX_STARTS,
   OWNER_AFTER_MS,
   START_WINDOW_MS,
   STARTUP_GRACE_MS,
-  applyRouting,
+  agentEnv,
+  cleanupSettingsText,
   headroomPaths,
   headroomStep,
   headroomView,
   installSteps,
+  isHeadroomProcess,
   isHeadroomProxy,
+  isHeadroomRelay,
   parseHealth,
+  parseRelayHealth,
   parseState,
   parseStats,
-  routeSettingsText,
+  relayArgv,
+  relayEnv,
+  relayStep,
   runArgv,
   runEnv,
+  stopPlan,
+  withoutLegacyRoute,
   type BeatFacts,
   type HeadroomState,
+  type RelayFacts,
+  type RelayReading,
 } from "./headroom";
+import { RELAY_VERSION, parseRelayArgs } from "./headroomrelay";
 
 const paths = headroomPaths("/Users/sam");
 const NOW = 1_800_000_000_000;
@@ -40,26 +57,80 @@ describe("install and run commands", () => {
     expect(steps.flatMap((s) => s.argv).join(" ")).not.toMatch(/\[all\]/);
     expect(paths.dir).toBe("/Users/sam/.local/share/the-orchestrator/headroom");
   });
-  it("binds 127.0.0.1 only, on the fixed port, in cache mode", () => {
+  it("binds 127.0.0.1 only, Headroom on 8792 behind the relay on 8791, in cache mode", () => {
     const argv = runArgv(paths);
-    expect(argv).toEqual([`${paths.dir}/venv/bin/headroom`, "proxy", "--host", "127.0.0.1", "--port", "8791", "--mode", "cache"]);
+    expect(argv).toEqual([`${paths.dir}/venv/bin/headroom`, "proxy", "--host", "127.0.0.1", "--port", "8792", "--mode", "cache"]);
     expect(argv).not.toContain("0.0.0.0");
-    expect(HEADROOM_URL).toBe("http://127.0.0.1:8791");
+    expect(HEADROOM_URL).toBe("http://127.0.0.1:8792");
+    expect(RELAY_URL).toBe("http://127.0.0.1:8791");
+    const relay = relayArgv(paths, "/opt/homebrew/bin/node");
+    expect(relay).toEqual([
+      "/opt/homebrew/bin/node",
+      `${paths.dir}/relay.mts`,
+      "--orchestrator-relay",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8791",
+      "--headroom-port",
+      "8792",
+    ]);
+    expect(parseRelayArgs(relay.slice(2))).toEqual({ host: "127.0.0.1", port: 8791, headroomPort: 8792 });
+  });
+  it("gives the relay PATH and HOME only: no keys, no base URL", () => {
+    expect(relayEnv({ PATH: "/usr/bin", HOME: "/Users/sam", ANTHROPIC_API_KEY: "sk-x", JEV_API_KEY: "j", ANTHROPIC_BASE_URL: RELAY_URL })).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/Users/sam",
+    });
   });
   it("always runs with the beacon and telemetry off, whatever the host's environment says", () => {
     const env = runEnv({ PATH: "/usr/bin", HEADROOM_BEACON: "on", HEADROOM_TELEMETRY: "on", DO_NOT_TRACK: "0" });
     expect(env).toMatchObject({ PATH: "/usr/bin", HEADROOM_BEACON: "off", HEADROOM_TELEMETRY: "off", DO_NOT_TRACK: "1" });
     for (const step of installSteps(paths)) expect(step.env).toMatchObject({ HEADROOM_BEACON: "off", HEADROOM_TELEMETRY: "off", DO_NOT_TRACK: "1" });
   });
-  it("never points the proxy at itself, but keeps another upstream", () => {
+  it("never points the proxy at itself or the relay, but keeps another upstream", () => {
     expect(runEnv({ ANTHROPIC_BASE_URL: HEADROOM_URL }).ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(runEnv({ ANTHROPIC_BASE_URL: `${RELAY_URL}/` }).ANTHROPIC_BASE_URL).toBeUndefined();
     expect(runEnv({ ANTHROPIC_BASE_URL: "https://gw.example.com" }).ANTHROPIC_BASE_URL).toBe("https://gw.example.com");
   });
-  it("knows its own proxy in ps, by the venv it installed", () => {
+});
+
+describe("ps matchers", () => {
+  // Exactly as ps shows them on the owner's Mac.
+  const REAL_PROXY = "/Users/samuelashirley/.local/share/the-orchestrator/headroom/venv/bin/python -m headroom.cli proxy --host 127.0.0.1 --port 8791 --mode cache";
+  const SCRIPT_PROXY = "/Users/samuelashirley/.local/share/the-orchestrator/headroom/venv/bin/headroom proxy --host 127.0.0.1 --port 8792 --mode cache";
+  const RELAY = "/opt/homebrew/bin/node /Users/samuelashirley/.local/share/the-orchestrator/headroom/relay.mts --orchestrator-relay --host 127.0.0.1 --port 8791 --headroom-port 8792";
+  it("knows our proxy in both forms, and through the venv's python running the script", () => {
+    expect(isHeadroomProxy(REAL_PROXY)).toBe(true);
+    expect(isHeadroomProxy(SCRIPT_PROXY)).toBe(true);
     expect(isHeadroomProxy(`${paths.python} ${runArgv(paths).join(" ")}`)).toBe(true);
+    expect(isHeadroomProxy(`${paths.python}3.12 -m headroom.cli proxy`)).toBe(true);
     expect(isHeadroomProxy(`${paths.bin} proxy`)).toBe(true);
-    expect(isHeadroomProxy(`${paths.bin} stats`)).toBe(false);
+  });
+  it("knows our relay, with or without node flags", () => {
+    expect(isHeadroomRelay(RELAY)).toBe(true);
+    expect(isHeadroomRelay(relayArgv(paths, "node").join(" "))).toBe(true);
+    expect(isHeadroomRelay(`/usr/local/bin/node --no-warnings ${paths.relayScript} --orchestrator-relay --port 8791`)).toBe(true);
+    expect(isHeadroomProcess(RELAY) && isHeadroomProcess(REAL_PROXY)).toBe(true);
+  });
+  it("never matches another venv's headroom, another subcommand, or an agent running headroom elsewhere", () => {
+    expect(isHeadroomProxy("/Users/samuelashirley/other/venv/bin/headroom proxy --port 8787")).toBe(false);
+    expect(isHeadroomProxy("/Users/samuelashirley/proj/.venv/bin/python -m headroom.cli proxy --port 8787")).toBe(false);
     expect(isHeadroomProxy("/tmp/x/bin/headroom proxy")).toBe(false);
+    expect(isHeadroomProxy("headroom proxy --host 127.0.0.1 --port 8791")).toBe(false);
+    expect(isHeadroomProxy(`/bin/zsh -c ${SCRIPT_PROXY}`)).toBe(false);
+    expect(isHeadroomProxy(`bash -c "${REAL_PROXY}"`)).toBe(false);
+    expect(isHeadroomProxy(`${paths.bin} stats`)).toBe(false);
+    expect(isHeadroomProxy(`${paths.python} -m headroom.cli stats`)).toBe(false);
+    expect(isHeadroomProxy(`${paths.python} -m headroom.cli proxyx`)).toBe(false);
+    expect(isHeadroomProxy("/Users/x/the-orchestrator/headroom/venv/bin/headroom proxy")).toBe(false);
+  });
+  it("never takes a shell, another script or a copy elsewhere for the relay", () => {
+    expect(isHeadroomRelay(`/bin/sh -c "node ${paths.relayScript} --orchestrator-relay"`)).toBe(false);
+    expect(isHeadroomRelay(`node /tmp/relay.mts --orchestrator-relay`)).toBe(false);
+    expect(isHeadroomRelay(`node ${paths.relayScript}`)).toBe(false);
+    expect(isHeadroomRelay(`node /Users/me/Github/the-orchestrator/headroomrelay.ts --orchestrator-relay`)).toBe(false);
+    expect(isHeadroomRelay(REAL_PROXY)).toBe(false);
   });
 });
 
@@ -103,27 +174,27 @@ const DOWN = parseHealth(null, null);
 
 describe("headroomStep", () => {
   it("installs when not installed, and after a failure waits an hour", () => {
-    expect(headroomStep(INITIAL_STATE, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "install", route: false });
+    expect(headroomStep(INITIAL_STATE, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "install", up: false });
     const failed = { ...INITIAL_STATE, installFailedAt: NOW - 1000, installError: "no network" };
-    expect(headroomStep(failed, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "none", route: false });
+    expect(headroomStep(failed, facts({ installed: false, pid: null, health: DOWN }))).toMatchObject({ action: "none", up: false });
     expect(headroomStep(failed, facts({ installed: false, pid: null, health: DOWN, now: NOW - 1000 + INSTALL_RETRY_MS })).action).toBe("install");
   });
   it("does nothing while installing, and routes nothing", () => {
-    expect(headroomStep(INITIAL_STATE, facts({ installed: false, installing: true, pid: null, health: DOWN }))).toMatchObject({ action: "none", route: false });
+    expect(headroomStep(INITIAL_STATE, facts({ installed: false, installing: true, pid: null, health: DOWN }))).toMatchObject({ action: "none", up: false });
   });
   it("starts an installed proxy that is not running", () => {
     const step = headroomStep(INITIAL_STATE, facts({ pid: null, health: DOWN }));
-    expect(step).toMatchObject({ action: "start", route: false });
+    expect(step).toMatchObject({ action: "start", up: false });
     expect(step.state.starts).toEqual([NOW]);
   });
   it("routes only while healthy", () => {
-    expect(headroomStep(INITIAL_STATE, facts())).toMatchObject({ action: "none", route: true });
-    expect(headroomStep(INITIAL_STATE, facts({ health: { healthy: false, reason: "x", pid: 4242 } })).route).toBe(false);
+    expect(headroomStep(INITIAL_STATE, facts())).toMatchObject({ action: "none", up: true });
+    expect(headroomStep(INITIAL_STATE, facts({ health: { healthy: false, reason: "x", pid: 4242 } })).up).toBe(false);
   });
   it("restarts after two unhealthy beats in a row, not one, and not while it is still starting", () => {
     const sick = { healthy: false as const, reason: "health check answered HTTP 500", pid: 4242 };
     const one = headroomStep(INITIAL_STATE, facts({ health: sick }));
-    expect(one).toMatchObject({ action: "none", route: false });
+    expect(one).toMatchObject({ action: "none", up: false });
     expect(headroomStep(one.state, facts({ health: sick, now: NOW + 30_000 })).action).toBe("restart");
     const justStarted = { ...INITIAL_STATE, starts: [NOW - STARTUP_GRACE_MS + 1] };
     const a = headroomStep(justStarted, facts({ health: sick }));
@@ -134,7 +205,7 @@ describe("headroomStep", () => {
   });
   it(`restarts a proxy over ${MAX_RSS_BYTES / 1024 ** 3} GB, routing off meanwhile`, () => {
     expect(headroomStep(INITIAL_STATE, facts({ rssBytes: MAX_RSS_BYTES })).action).toBe("none");
-    expect(headroomStep(INITIAL_STATE, facts({ rssBytes: MAX_RSS_BYTES + 1 }))).toMatchObject({ action: "restart", route: false });
+    expect(headroomStep(INITIAL_STATE, facts({ rssBytes: MAX_RSS_BYTES + 1 }))).toMatchObject({ action: "restart", up: false });
   });
   it(`starts at most ${MAX_STARTS} times in ${START_WINDOW_MS / 60_000} min, then stays down`, () => {
     let state: HeadroomState = INITIAL_STATE;
@@ -152,7 +223,7 @@ describe("headroomStep", () => {
   });
   it("is off when stopped, whatever it sees", () => {
     const stopped = { ...INITIAL_STATE, stopped: true };
-    expect(headroomStep(stopped, facts())).toMatchObject({ action: "none", route: false });
+    expect(headroomStep(stopped, facts())).toMatchObject({ action: "none", up: false });
     expect(headroomStep(stopped, facts({ installed: false, pid: null, health: DOWN })).action).toBe("none");
   });
   it("forgets an old install failure once installed", () => {
@@ -171,66 +242,202 @@ describe("parseState", () => {
   });
 });
 
-describe("routing in settings.local.json", () => {
+describe("the one-time settings cleanup", () => {
   const builder = {
     hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "node '/p/builderguard.ts' '/wt' || exit 2" }] }] },
     sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, network: { allowedDomains: ["registry.npmjs.org"] } },
     permissions: { deny: ["Bash(git push:*)"] },
     env: { FOO: "1" },
   };
-  const written = (text: string | null, on: boolean) => {
-    const change = routeSettingsText(text, on);
-    return change.action === "write" ? (JSON.parse(change.text) as Record<string, unknown>) : change;
+  const cleaned = (value: unknown) => {
+    const change = cleanupSettingsText(JSON.stringify(value));
+    return change.action === "write" ? (JSON.parse(change.text) as unknown) : change;
   };
-  it("healthy: our URL is added; every other key survives", () => {
-    const out = written(JSON.stringify(builder), true) as typeof builder & { env: Record<string, string> };
-    expect(out.env).toEqual({ FOO: "1", ANTHROPIC_BASE_URL: HEADROOM_URL });
-    expect({ ...out, env: builder.env }).toEqual(builder);
+  it("removes our key; every other key survives, and an emptied env goes", () => {
+    expect(cleaned({ ...builder, env: { FOO: "1", ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL } })).toEqual(builder);
+    const { env: _env, ...noEnv } = builder;
+    expect(cleaned({ ...noEnv, env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL } })).toEqual(noEnv);
+    expect(cleaned({ env: { ANTHROPIC_BASE_URL: `${LEGACY_SETTINGS_URL}/` }, model: "x" })).toEqual({ model: "x" });
   });
-  it("unhealthy: our URL is removed; every other key survives, and an emptied env goes", () => {
-    const on = { ...builder, env: { FOO: "1", ANTHROPIC_BASE_URL: HEADROOM_URL } };
-    expect(written(JSON.stringify(on), false)).toEqual(builder);
-    expect(written(JSON.stringify({ env: { ANTHROPIC_BASE_URL: HEADROOM_URL } }), false)).toEqual({});
+  it("deletes the file only when it held nothing but our key", () => {
+    expect(cleanupSettingsText(JSON.stringify({ env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL } }))).toEqual({ action: "delete" });
+    expect(cleanupSettingsText(JSON.stringify({ env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL }, permissions: {} })).action).toBe("write");
+    expect(cleanupSettingsText(JSON.stringify({ env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL, FOO: "1" } })).action).toBe("write");
+    expect(cleanupSettingsText("{}")).toEqual({ action: "none" });
+    expect(cleanupSettingsText(null)).toEqual({ action: "none" });
   });
-  it("creates the file only to turn routing on", () => {
-    expect(written(null, true)).toEqual({ env: { ANTHROPIC_BASE_URL: HEADROOM_URL } });
-    expect(routeSettingsText(null, false)).toEqual({ action: "none" });
+  it("never changes or removes an ANTHROPIC_BASE_URL that is not exactly ours", () => {
+    for (const other of ["https://gateway.example.com", "http://127.0.0.1:8792", "http://localhost:8791", "http://127.0.0.1:87910", "http://127.0.0.1:8791/v1"]) {
+      expect(cleanupSettingsText(JSON.stringify({ env: { ANTHROPIC_BASE_URL: other } }))).toEqual({ action: "none" });
+    }
+    expect(cleanupSettingsText(JSON.stringify({ ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL }))).toEqual({ action: "none" });
   });
-  it("never changes or removes an ANTHROPIC_BASE_URL the owner set", () => {
-    const owner = JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://gateway.example.com" } });
-    expect(routeSettingsText(owner, true)).toEqual({ action: "none" });
-    expect(routeSettingsText(owner, false)).toEqual({ action: "none" });
-    const near = JSON.stringify({ env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8792" } });
-    expect(routeSettingsText(near, false)).toEqual({ action: "none" });
+  it("leaves a file that does not parse alone, and one with a strange env untouched", () => {
+    expect(cleanupSettingsText("{ not json").action).toBe("skip");
+    expect(cleanupSettingsText("[]").action).toBe("skip");
+    expect(cleanupSettingsText(JSON.stringify({ env: ["x"] }))).toEqual({ action: "none" });
+    expect(withoutLegacyRoute({ env: "x" })).toBeNull();
   });
   it("is idempotent", () => {
-    const on = routeSettingsText(JSON.stringify(builder), true);
-    expect(on.action).toBe("write");
-    expect(routeSettingsText(on.action === "write" ? on.text : "", true)).toEqual({ action: "none" });
-    expect(routeSettingsText(JSON.stringify(builder), false)).toEqual({ action: "none" });
+    const once = cleanupSettingsText(JSON.stringify({ ...builder, env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL } }));
+    expect(once.action).toBe("write");
+    expect(cleanupSettingsText(once.action === "write" ? once.text : "")).toEqual({ action: "none" });
   });
-  it("leaves a file that does not parse, or has a strange env, alone", () => {
-    expect(routeSettingsText("{ not json", true).action).toBe("skip");
-    expect(routeSettingsText("[]", true).action).toBe("skip");
-    expect(routeSettingsText(JSON.stringify({ env: ["x"] }), true).action).toBe("skip");
-    expect(applyRouting({ env: "x" }, true)).toBeNull();
+  it("never adds a base URL, whatever it is given", () => {
+    const inputs = [
+      null,
+      "{}",
+      JSON.stringify(builder),
+      JSON.stringify({ env: {} }),
+      JSON.stringify({ env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL, OTHER: RELAY_URL } }),
+      JSON.stringify({ env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL } }),
+    ];
+    for (const text of inputs) {
+      const change = cleanupSettingsText(text);
+      if (change.action !== "write") continue;
+      const out = JSON.parse(change.text) as { env?: Record<string, unknown> };
+      expect(out.env?.[BASE_URL_KEY]).toBeUndefined();
+    }
+  });
+});
+
+describe("no settings file is ever routed", () => {
+  // Routing is per thread (agentEnv through bb's provider env). The first
+  // version wrote ANTHROPIC_BASE_URL into every checkout's settings and
+  // routed the owner's own sessions; none of that code may come back.
+  const source = (file: string) => readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
+  it("has no routing writer left in headroom.ts, host.ts or server.ts", () => {
+    for (const file of ["headroom.ts", "host.ts", "server.ts"]) {
+      const text = source(file);
+      expect(text).not.toMatch(/\bapplyRouting\b|\brouteSettingsText\b|\brouteCheckout\b/);
+    }
+  });
+  it("names the base URL key in host.ts only through the cleanup", () => {
+    const host = source("host.ts");
+    expect(host).not.toMatch(/ANTHROPIC_BASE_URL["'`]?\s*[:\]]/);
+    expect(host).not.toMatch(/\bBASE_URL_KEY\b/);
+    expect(host).not.toMatch(/\bRELAY_URL\b[^\n]*settings/i);
+  });
+});
+
+describe("agentEnv", () => {
+  const fresh = { enabled: true, relayHealthy: true, at: NOW - 1_000 };
+  it("routes an Orchestrator agent thread through the relay while enabled and the relay answered", () => {
+    expect(agentEnv({ agent: true, reading: fresh, now: NOW })).toEqual([
+      { name: "ANTHROPIC_BASE_URL", value: "http://127.0.0.1:8791", reason: expect.stringContaining("relay") },
+    ]);
+  });
+  it("gives an unknown thread (the owner's own session) nothing", () => {
+    expect(agentEnv({ agent: false, reading: fresh, now: NOW })).toEqual([]);
+  });
+  it("gives nothing when stopped, when the relay is down, or with no reading", () => {
+    expect(agentEnv({ agent: true, reading: { ...fresh, enabled: false }, now: NOW })).toEqual([]);
+    expect(agentEnv({ agent: true, reading: { ...fresh, relayHealthy: false }, now: NOW })).toEqual([]);
+    expect(agentEnv({ agent: true, reading: null, now: NOW })).toEqual([]);
+  });
+  it(`gives nothing on a reading older than ${ROUTE_FRESH_MS / 1000} s, or one from the future`, () => {
+    expect(agentEnv({ agent: true, reading: { ...fresh, at: NOW - ROUTE_FRESH_MS }, now: NOW })).toHaveLength(1);
+    expect(agentEnv({ agent: true, reading: { ...fresh, at: NOW - ROUTE_FRESH_MS - 1 }, now: NOW })).toEqual([]);
+    expect(agentEnv({ agent: true, reading: { ...fresh, at: NOW + 60_000 }, now: NOW })).toEqual([]);
+  });
+  it("never names Headroom's own port: agents only ever see the relay", () => {
+    expect(JSON.stringify(agentEnv({ agent: true, reading: fresh, now: NOW }))).not.toContain(":8792");
+  });
+});
+
+describe("parseRelayHealth", () => {
+  it("is healthy on 200 with ok and a pid", () => {
+    expect(parseRelayHealth(200, { ok: true, pid: 77, version: RELAY_VERSION, upstream: "direct", inFlight: 2, startedAt: 1 })).toEqual({
+      healthy: true,
+      pid: 77,
+      version: RELAY_VERSION,
+      inFlight: 2,
+    });
+  });
+  it("is down on no answer, a non-200, no ok or no pid", () => {
+    expect(parseRelayHealth(null, null)).toEqual(NO_RELAY);
+    expect(parseRelayHealth(502, { ok: true, pid: 77 })).toEqual(NO_RELAY);
+    expect(parseRelayHealth(200, { ok: "true", pid: 77 })).toEqual(NO_RELAY);
+    expect(parseRelayHealth(200, { ok: true })).toEqual(NO_RELAY);
+    expect(parseRelayHealth(200, "<html>")).toEqual(NO_RELAY);
+  });
+});
+
+describe("relayStep", () => {
+  const up: RelayReading = { healthy: true, pid: 77, version: RELAY_VERSION, inFlight: 0 };
+  const base: RelayFacts = { stopped: false, pid: 77, reading: up, activeAgentTurns: 0, canStart: true, unhealthyBeats: 0 };
+  const step = (over: Partial<RelayFacts>) => relayStep({ ...base, ...over });
+  it("leaves a healthy relay alone", () => {
+    expect(step({}).action).toBe("none");
+    expect(step({ activeAgentTurns: 3 }).action).toBe("none");
+  });
+  it("starts a dead relay at once", () => {
+    expect(step({ pid: null, reading: NO_RELAY })).toMatchObject({ action: "start" });
+    expect(step({ pid: null, reading: NO_RELAY, activeAgentTurns: 2 })).toMatchObject({ action: "start" });
+  });
+  it("restarts a live relay only after two beats without an answer", () => {
+    const one = step({ reading: NO_RELAY });
+    expect(one).toMatchObject({ action: "none", unhealthyBeats: 1 });
+    expect(step({ reading: NO_RELAY, unhealthyBeats: one.unhealthyBeats })).toMatchObject({ action: "restart", unhealthyBeats: 0 });
+  });
+  it("cannot start without the script, and says so", () => {
+    expect(step({ pid: null, reading: NO_RELAY, canStart: false })).toMatchObject({ action: "none", reason: expect.stringMatching(/script/) });
+  });
+  it("replaces an older relay only when nothing uses it", () => {
+    const old = { ...up, version: RELAY_VERSION - 1 };
+    expect(step({ reading: old }).action).toBe("restart");
+    expect(step({ reading: old, activeAgentTurns: 1 }).action).toBe("none");
+    expect(step({ reading: { ...old, inFlight: 1 } }).action).toBe("none");
+  });
+  it("stopped: never stops the relay while an agent turn is active or a request is in flight", () => {
+    expect(step({ stopped: true, activeAgentTurns: 1 })).toMatchObject({ action: "none", reason: "waiting for 1 agent turn to finish" });
+    expect(step({ stopped: true, activeAgentTurns: 4 }).action).toBe("none");
+    expect(step({ stopped: true, reading: { ...up, inFlight: 2 } })).toMatchObject({ action: "none", reason: "waiting for 2 requests in flight" });
+    expect(step({ stopped: true }).action).toBe("stop");
+    expect(step({ stopped: true, reading: NO_RELAY }).action).toBe("stop");
+    expect(step({ stopped: true, reading: NO_RELAY, pid: null }).action).toBe("none");
+  });
+  it("stopped: never starts one", () => {
+    expect(step({ stopped: true, pid: null, reading: NO_RELAY }).action).toBe("none");
+  });
+});
+
+describe("stopPlan", () => {
+  const up: RelayReading = { healthy: true, pid: 77, version: RELAY_VERSION, inFlight: 0 };
+  it("stops Headroom at once and the relay only when no agent turn is active", () => {
+    expect(stopPlan({ headroomPid: 9, relayAlive: true, activeAgentTurns: 0, reading: up })).toEqual({ stopHeadroom: true, stopRelay: true, relayWaits: null });
+    expect(stopPlan({ headroomPid: 9, relayAlive: true, activeAgentTurns: 2, reading: up })).toEqual({
+      stopHeadroom: true,
+      stopRelay: false,
+      relayWaits: "waiting for 2 agent turns to finish",
+    });
+    expect(stopPlan({ headroomPid: 9, relayAlive: true, activeAgentTurns: 0, reading: { ...up, inFlight: 1 } }).stopRelay).toBe(false);
+  });
+  it("has nothing to stop when nothing runs", () => {
+    expect(stopPlan({ headroomPid: null, relayAlive: false, activeAgentTurns: 3, reading: NO_RELAY })).toEqual({ stopHeadroom: false, stopRelay: false, relayWaits: null });
   });
 });
 
 describe("headroomView", () => {
-  const view = (state: HeadroomState, route = false, now = NOW) =>
-    headroomView({ state, route, stats: route ? { tokensRemoved: 1_234_567, tokensBefore: 14_355_430, requests: 9 } : null, now, paths });
+  const view = (state: HeadroomState, up = false, now = NOW, relayUp = true, relayNote: string | null = null) =>
+    headroomView({ state, up, relayUp, relayNote, stats: up ? { tokensRemoved: 1_234_567, tokensBefore: 14_355_430, requests: 9 } : null, now, paths });
   it("says on, with the measured tokens removed and their share", () => {
     expect(view(INITIAL_STATE, true).line).toBe("Headroom: on · 1.2M tokens removed (8.6%)");
-    expect(headroomView({ state: INITIAL_STATE, route: true, stats: { tokensRemoved: 900, tokensBefore: null, requests: null }, now: NOW, paths }).line).toBe(
-      "Headroom: on · 900 tokens removed",
-    );
+    expect(
+      headroomView({ state: INITIAL_STATE, up: true, relayUp: true, relayNote: null, stats: { tokensRemoved: 900, tokensBefore: null, requests: null }, now: NOW, paths }).line,
+    ).toBe("Headroom: on · 900 tokens removed");
   });
   it("says installing, starting, off, or down with the reason", () => {
     expect(view({ ...INITIAL_STATE, reason: "installing" }).line).toBe("Headroom: installing…");
     expect(view({ ...INITIAL_STATE, reason: "starting" }).line).toBe("Headroom: starting…");
-    expect(view({ ...INITIAL_STATE, stopped: true }).line).toBe("Headroom: off");
+    expect(view({ ...INITIAL_STATE, stopped: true }, false, NOW, false).line).toBe("Headroom: off, agents go direct");
     expect(view({ ...INITIAL_STATE, reason: "not answering", downSince: NOW }).line).toBe("Headroom: down, agents go direct (not answering)");
+  });
+  it("says when the relay is down, and why a stopped relay is still up", () => {
+    expect(view(INITIAL_STATE, true, NOW, false, "starting the relay")).toMatchObject({ state: "down", line: "Headroom: down, agents go direct (starting the relay)" });
+    expect(view({ ...INITIAL_STATE, stopped: true }, false, NOW, true, "waiting for 1 agent turn to finish").line).toBe(
+      "Headroom: off, agents go direct (the relay stays up, waiting for 1 agent turn to finish)",
+    );
   });
   it("needs the owner only past the restart cap and down over 30 min, with the log to read", () => {
     const capped = { ...INITIAL_STATE, starts: Array.from({ length: MAX_STARTS }, (_, i) => NOW - i * 1000), reason: "staying down", downSince: NOW - OWNER_AFTER_MS - 1 };

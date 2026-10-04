@@ -119,16 +119,25 @@ what must not break.
   at most 3 tabs of its own, released when its pass ends. Builders: no browser.
 - `memwatch.sh` is the backstop outside bb: it kills the largest process in
   bb's tree before the Mac runs out, and logs to `.memwatch/`.
-- Headroom (`headroom.ts`, host beat): every agent goes through a local
-  proxy, fail-open: `ANTHROPIC_BASE_URL` is in managed checkouts'
-  `.claude/settings.local.json` only while it is healthy, never touching one
-  the owner set. Beacon and telemetry off, 127.0.0.1 only, pinned version,
-  detached so it survives reloads; counted in the agent tree budget, never
-  killed by it.
+- Headroom (`headroom.ts`, `headroomrelay.ts`, host beat): per thread, never
+  through a settings file. bb's provider env (`experimental_contributeEnv`,
+  server.ts) gives `ANTHROPIC_BASE_URL=http://127.0.0.1:8791` only to a
+  Patches chat, task, research or build thread, only while not stopped and
+  the relay answered within 10 s; the owner's own sessions get nothing. 8791
+  is the relay (own detached process, survives reloads), which sends each
+  request to Headroom on 8792 while healthy, else straight to Anthropic.
+  Stop order: stopped, Headroom, then the relay only once no agent turn is
+  active. Kills only verified pids (ps matchers). Beacon and telemetry off,
+  127.0.0.1 only, pinned version; both counted in the agent tree budget,
+  never killed by it. If the relay itself dies, routed calls fail until the
+  next beat restarts it (up to 30 s). Off until the owner starts it.
 - Jev steers one thing: the model of task, research and build agents
-  (`modelroute.ts`), through TypeSafe with the key in
-  `~/.config/the-orchestrator/jev.env` (`typesafe.ts`; only host.ts reads it,
-  refused if others can read the file). Sonnet only when Jev says sonnet at
+  (`modelroute.ts`), through TypeSafe with `JEV_API_KEY` from
+  `~/.config/the-orchestrator/jev.env` if that file exists, else The
+  Orchestrator repo's own `.env` (its land: "main" project's main checkout,
+  never a worktree's; `typesafe.ts` jevKey). Only host.ts reads them; a file
+  others can read is refused (the board names it: `chmod 600 <path>`), and
+  so is a repo `.env` git tracks. Sonnet only when Jev says sonnet at
   0.7 or more; anything else, or any failure, passes no model (the provider
   default). Patches never; the owner's composer pick wins. What is sent is
   scrubbed first. Its kind/tier questions stay watch-only (`jevwatch.ts`):

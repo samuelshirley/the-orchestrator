@@ -246,52 +246,78 @@ describe("the setup wizard's host calls", () => {
 });
 
 describe("Jev model routing", () => {
-  it("modelRoute takes only the state, no path, key or URL", () => {
+  const checkout = "/Users/me/Github/the-orchestrator";
+  it("modelRoute takes the state and The Orchestrator's checkout, no key path or URL", () => {
     const { input } = hostContract.modelRoute;
-    expect(input.safeParse({ state: "Task: x" }).success).toBe(true);
-    expect(input.safeParse({ state: "" }).success).toBe(false);
-    expect(input.safeParse({ state: "x".repeat(4001) }).success).toBe(false);
-    expect(input.safeParse({ state: "x", baseUrl: "https://evil.example" }).success).toBe(false);
-    expect(input.safeParse({ state: "x", keyPath: "/etc/passwd" }).success).toBe(false);
+    expect(input.safeParse({ state: "Task: x", checkout }).success).toBe(true);
+    expect(input.safeParse({ state: "Task: x", checkout: null }).success).toBe(true);
+    expect(input.safeParse({ state: "Task: x" }).success).toBe(false);
+    expect(input.safeParse({ state: "", checkout }).success).toBe(false);
+    expect(input.safeParse({ state: "x".repeat(4001), checkout }).success).toBe(false);
+    expect(input.safeParse({ state: "x", checkout, baseUrl: "https://evil.example" }).success).toBe(false);
+    expect(input.safeParse({ state: "x", checkout, keyPath: "/etc/passwd" }).success).toBe(false);
   });
   it("modelRoute returns an answer or a typed failure, never the key", () => {
     const { output } = hostContract.modelRoute;
     expect(output.safeParse({ ok: true, latencyMs: 3, model: "jev-1.13.0", answer: { choice: "sonnet", top: 0.8, margin: 0.6 } }).success).toBe(true);
     expect(output.safeParse({ ok: false, kind: "no-key", problem: "open" }).success).toBe(true);
+    expect(output.safeParse({ ok: false, kind: "no-key", problem: "tracked" }).success).toBe(true);
     expect(output.safeParse({ ok: false, kind: "timeout", error: "slow", latencyMs: 2000 }).success).toBe(true);
     expect(output.safeParse({ ok: false, kind: "no-key", problem: "open", key: "x" }).success).toBe(false);
   });
-  it("routeKeyStatus says presence only", () => {
+  it("routeKeyStatus says presence and the file, never the key", () => {
     const { input, output } = hostContract.routeKeyStatus;
-    expect(input.safeParse({}).success).toBe(true);
-    expect(input.safeParse({ path: "/x" }).success).toBe(false);
-    expect(output.safeParse({ present: true }).success).toBe(true);
-    expect(output.safeParse({ present: false, problem: "missing" }).success).toBe(true);
-    expect(output.safeParse({ present: true, key: "k" }).success).toBe(false);
+    expect(input.safeParse({ checkout }).success).toBe(true);
+    expect(input.safeParse({ checkout: null }).success).toBe(true);
+    expect(input.safeParse({ checkout, path: "/x" }).success).toBe(false);
+    expect(output.safeParse({ present: true, file: "~/.config/the-orchestrator/jev.env" }).success).toBe(true);
+    expect(output.safeParse({ present: false, problem: "missing", file: null }).success).toBe(true);
+    expect(output.safeParse({ present: false, problem: "tracked", file: `${checkout}/.env` }).success).toBe(true);
+    expect(output.safeParse({ present: true, file: "x", key: "k" }).success).toBe(false);
   });
 });
 
 describe("headroomBeat", () => {
   const { input, output } = hostContract.headroomBeat;
   const view = { state: "on", line: "Headroom: on · 1.2M tokens removed (8.6%)", needsOwner: null };
-  it("takes only the checkouts to route", () => {
-    expect(input.safeParse({ checkouts: ["/Users/me/Github/app", "/Users/me/Github/app/.claude/worktrees/x"] }).success).toBe(true);
-    expect(input.safeParse({ checkouts: [""] }).success).toBe(false);
-    expect(input.safeParse({ checkouts: [], url: "http://0.0.0.0:1" }).success).toBe(false);
+  const route = { enabled: true, relayHealthy: true };
+  const beat = { checkouts: ["/Users/me/Github/app", "/Users/me/Github/app/.claude/worktrees/x"], pluginRoot: "/Users/me/Github/the-orchestrator", activeAgentTurns: 2 };
+  it("takes the checkouts to clean up, the plugin's source and the agent turns running", () => {
+    expect(input.safeParse(beat).success).toBe(true);
+    expect(input.safeParse({ ...beat, pluginRoot: null, activeAgentTurns: 0 }).success).toBe(true);
+    expect(input.safeParse({ ...beat, checkouts: [""] }).success).toBe(false);
+    expect(input.safeParse({ ...beat, activeAgentTurns: -1 }).success).toBe(false);
+    expect(input.safeParse({ checkouts: [] }).success).toBe(false);
+    expect(input.safeParse({ ...beat, url: "http://0.0.0.0:1" }).success).toBe(false);
   });
-  it("returns the board's view and the checkouts left alone, nothing raw", () => {
-    expect(output.safeParse({ view, skipped: [] }).success).toBe(true);
-    expect(output.safeParse({ view: { ...view, state: "down", needsOwner: { title: "Headroom is down", body: "b", command: "tail -n 100 /x/proxy.log" } }, skipped: [{ path: "/a", reason: ".claude/ is not gitignored there" }] }).success).toBe(true);
-    expect(output.safeParse({ view, skipped: [], log: "raw install output" }).success).toBe(false);
-    expect(output.safeParse({ view: { ...view, state: "maybe" }, skipped: [] }).success).toBe(false);
+  it("returns the board's view, the checkouts left alone and the route, nothing raw", () => {
+    expect(output.safeParse({ view, skipped: [], route }).success).toBe(true);
+    expect(output.safeParse({ view: { ...view, state: "down", needsOwner: { title: "Headroom is down", body: "b", command: "tail -n 100 /x/proxy.log" } }, skipped: [{ path: "/a", reason: "settings.local.json does not parse as JSON; left alone" }], route }).success).toBe(true);
+    expect(output.safeParse({ view, skipped: [] }).success).toBe(false);
+    expect(output.safeParse({ view, skipped: [], route, log: "raw install output" }).success).toBe(false);
+    expect(output.safeParse({ view: { ...view, state: "maybe" }, skipped: [], route }).success).toBe(false);
+  });
+});
+
+describe("headroomRoute", () => {
+  it("takes nothing and says only whether to route", () => {
+    const { input, output } = hostContract.headroomRoute;
+    expect(input.safeParse({}).success).toBe(true);
+    expect(input.safeParse({ threadId: "thr_x" }).success).toBe(false);
+    expect(output.safeParse({ enabled: true, relayHealthy: false }).success).toBe(true);
+    expect(output.safeParse({ enabled: true, relayHealthy: false, url: "http://127.0.0.1:8791" }).success).toBe(false);
   });
 });
 
 describe("headroomControl", () => {
-  it("is stop or start, nothing else", () => {
-    const { input } = hostContract.headroomControl;
-    expect(input.safeParse({ action: "stop" }).success).toBe(true);
-    expect(input.safeParse({ action: "start" }).success).toBe(true);
-    expect(input.safeParse({ action: "install" }).success).toBe(false);
+  it("is stop or start, with the plugin's source and the agent turns running", () => {
+    const { input, output } = hostContract.headroomControl;
+    const base = { pluginRoot: null, activeAgentTurns: 0 };
+    expect(input.safeParse({ action: "stop", ...base }).success).toBe(true);
+    expect(input.safeParse({ action: "start", ...base, pluginRoot: "/Users/me/Github/the-orchestrator" }).success).toBe(true);
+    expect(input.safeParse({ action: "install", ...base }).success).toBe(false);
+    expect(input.safeParse({ action: "stop" }).success).toBe(false);
+    expect(output.safeParse({ ok: true, relayWaits: "waiting for 1 agent turn to finish" }).success).toBe(true);
+    expect(output.safeParse({ ok: true, relayWaits: null }).success).toBe(true);
   });
 });

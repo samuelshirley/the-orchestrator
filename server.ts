@@ -79,6 +79,7 @@ import { INITIAL_LOCAL_CONFIG, configBlocks, nextLocalConfig, type LocalConfigSt
 import { backupPush, buildBaseRef, profileFor, worktreeIncludeOf, type ProjectProfile } from "./profiles.js";
 import { headShaUpdate, prCounts, staleReason, type BranchFate } from "./release.js";
 import { threadRole } from "./roles.js";
+import { agentEnv, routeFresh, type RouteReading } from "./headroom.js";
 import {
   closeHeldKey,
   closeHold,
@@ -455,9 +456,12 @@ export const boardStateSchema = z.object({
       answeredBy: z.string().nullable(),
     }),
   ),
-  /** Whether the host has a usable TypeSafe key (presence only, typesafe.ts); null when it cannot say. */
+  /** Whether the host has a usable TypeSafe key, and the file it is in or about (presence and a path only, typesafe.ts jevKey); null when it cannot say. */
   modelRouteKey: z
-    .union([z.object({ present: z.literal(true) }), z.object({ present: z.literal(false), problem: z.enum(["missing", "open"]) })])
+    .union([
+      z.object({ present: z.literal(true), file: z.string() }),
+      z.object({ present: z.literal(false), problem: z.enum(["missing", "open", "tracked"]), file: z.string().nullable() }),
+    ])
     .nullable(),
   /** Claude is signed out (signin.ts signedOutView): the one Needs you item; null when signed in. */
   signedOut: z.object({ since: z.number(), waiting: z.number(), latest: z.number(), command: z.string() }).nullable(),
@@ -777,8 +781,12 @@ export const rpcContract = defineRpcContract({
   },
   /** The last liveness check (liveness.ts): cached, so polling it costs nothing. */
   liveness: { input: z.object({}).strict(), output: livenessSchema },
-  /** Stop the Headroom proxy for good (agents go direct), or start it again. */
-  headroom_control: { input: z.object({ action: z.enum(["stop", "start"]) }).strict(), output: z.object({ ok: z.literal(true) }) },
+  /** Stop Headroom for good (new threads go direct; the relay goes once no agent turn runs), or start it again. */
+  headroom_control: {
+    input: z.object({ action: z.enum(["stop", "start"]) }).strict(),
+    /** relayWaits: why the relay is still up after a stop (agent turns running); a later beat stops it. */
+    output: z.object({ ok: z.literal(true), relayWaits: z.string().nullable() }),
+  },
   /** The owner's Restart on a task thread in trouble: retry its failed turn, or stop a silent one and tell it to carry on. */
   agent_restart: {
     input: z.object({ taskId: z.string().min(1).max(100) }).strict(),
@@ -2084,7 +2092,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (input.hostId === null) return skippedRoute("error", "no host");
     let record: RouteRecord;
     try {
-      const reply = await host.call("modelRoute", { state: input.state() }, { hostId: input.hostId, timeoutMs: ROUTE_TIMEOUT_MS + 500 });
+      const checkout = await orchestratorCheckout(input.hostId);
+      const reply = await host.call("modelRoute", { state: input.state(), checkout }, { hostId: input.hostId, timeoutMs: ROUTE_TIMEOUT_MS + 500 });
       record = routeDecision(reply);
     } catch (error) {
       record = skippedRoute("error", `host: ${describeError(error)}`);
@@ -2104,15 +2113,43 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
+  /**
+   * The Orchestrator's own main checkout on a host: the project whose profile
+   * lands on main (profiles.ts; only the built-in one may), its default local
+   * source, never a worktree. The repo .env the Jev key may live in is there
+   * (typesafe.ts jevKey). Kept a minute: it is on the spawn path.
+   */
+  const orchestratorCheckouts = new Map<string, { at: number; path: string | null }>();
+  async function orchestratorCheckout(hostId: string): Promise<string | null> {
+    const cached = orchestratorCheckouts.get(hostId);
+    if (cached !== undefined && Date.now() - cached.at < 60_000) return cached.path;
+    let found: string | null = null;
+    try {
+      for (const project of await allProjects()) {
+        if (project.kind === "personal" || profileOf(project).land !== "main") continue;
+        const source = sourceOf(project);
+        if (source !== null && source.hostId === hostId) {
+          found = source.path;
+          break;
+        }
+      }
+    } catch {
+      found = cached?.path ?? null;
+    }
+    orchestratorCheckouts.set(hostId, { at: Date.now(), path: found });
+    return found;
+  }
+
+  type RouteKeyStatus = { present: true; file: string } | { present: false; problem: "missing" | "open" | "tracked"; file: string | null };
   /** routeKeyStatus, kept a minute: board_state runs on every dossier change. */
-  let routeKeySeen: { at: number; status: { present: true } | { present: false; problem: "missing" | "open" } | null } | null = null;
+  let routeKeySeen: { at: number; status: RouteKeyStatus | null } | null = null;
 
   async function routeKey(hostId: string | null) {
     if (routeKeySeen !== null && Date.now() - routeKeySeen.at < 60_000) return routeKeySeen.status;
-    let status: { present: true } | { present: false; problem: "missing" | "open" } | null = null;
+    let status: RouteKeyStatus | null = null;
     if (hostId !== null) {
       try {
-        status = await host.call("routeKeyStatus", {}, { hostId, timeoutMs: 5_000 });
+        status = await host.call("routeKeyStatus", { checkout: await orchestratorCheckout(hostId) }, { hostId, timeoutMs: 5_000 });
       } catch {
         status = null;
       }
@@ -3217,6 +3254,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
     }
     if (chat !== null) {
+      configuredAgents.add(context.thread.id);
       // A chat sees only its own project's open tasks; the build cap stays shared.
       const tasks = chatTasks(store.tasks({ includeClosed: false }), chat.projectId);
       const summary = dossierSummary(tasks, store.tickets({ status: "open" }), null);
@@ -3238,6 +3276,7 @@ export default async function plugin(bb: BbPluginApi) {
       task: (id) => store.task(id),
     });
     if (role === null) return none;
+    configuredAgents.add(context.thread.id);
     const profile = profileOf({ name: context.project.name, gitRemoteUrl: context.project.gitRemoteUrl });
     if (role.kind === "task") {
       return { tools: TASK_TOOLS, skills: [], instructions: taskInstructions(role.task, context.project.name, profile, localConfig.config.chromeAccount ?? null) };
@@ -3247,6 +3286,96 @@ export default async function plugin(bb: BbPluginApi) {
       skills: [],
       instructions: role.kind === "build" ? builderInstructions(role.owner, profile) : researchInstructions(role.owner, localConfig.config.chromeAccount ?? null),
     };
+  });
+
+  // --------------------------------------------------------------- Headroom
+  // Per thread, never through settings files (headroom.ts agentEnv): bb asks
+  // this for every start, resume, fork and turn of a claude-code thread, and
+  // only The Orchestrator's own agent threads get ANTHROPIC_BASE_URL at the
+  // relay, only while Headroom is not stopped and the relay answered within
+  // ROUTE_FRESH_MS (read fresh from the host when older). The owner's own
+  // sessions, and anything unknown, get nothing.
+  /** Threads configure gave a role this server process: spawned, maybe not in the dossier yet. */
+  const configuredAgents = new Set<string>();
+  /** Threads given the relay URL this server process: a stopped relay waits for them. */
+  const routedThreads = new Set<string>();
+  const routeReadings = new Map<string, RouteReading>();
+  const routeReads = new Map<string, Promise<RouteReading | null>>();
+  /** Bumped by a stop: a reading started before it never counts. */
+  let routeGeneration = 0;
+
+  function routeReading(hostId: string): Promise<RouteReading | null> {
+    const cached = routeReadings.get(hostId) ?? null;
+    if (routeFresh(cached, Date.now())) return Promise.resolve(cached);
+    const pending = routeReads.get(hostId);
+    if (pending !== undefined) return pending;
+    const generation = routeGeneration;
+    const read = host
+      .call("headroomRoute", {}, { hostId, timeoutMs: 2_000 })
+      .then(
+        (route) => {
+          if (generation !== routeGeneration) return null;
+          const reading = { ...route, at: Date.now() };
+          routeReadings.set(hostId, reading);
+          return reading;
+        },
+        () => null,
+      )
+      .finally(() => routeReads.delete(hostId));
+    routeReads.set(hostId, read);
+    return read;
+  }
+
+  /** A Patches chat, or a task, research or build thread (roles.ts), by dossier or spawn metadata. */
+  async function orchestratorAgent(threadId: string, projectId: string): Promise<boolean> {
+    if (knownAgent(threadId)) return true;
+    try {
+      const thread = await bb.sdk.threads.get({ threadId });
+      if (thread.originPluginId !== bb.pluginId) return false;
+      const metadata = await bb.sdk.threads.getPluginMetadata({ threadId, pluginId: bb.pluginId });
+      if (metadata.role === "orchestrator") {
+        const project = await projectById(projectId);
+        const claimed = claimedChat({
+          role: metadata.role,
+          metadataProjectId: metadata.projectId,
+          projectId: project.id,
+          projectKind: project.kind === "personal" ? "personal" : "standard",
+        });
+        return claimed !== null && (chatThread(claimed.projectId) ?? threadId) === threadId;
+      }
+      const role = threadRole({
+        threadId,
+        parentThreadId: thread.parentThreadId ?? null,
+        metadata,
+        taskByThread: null,
+        child: null,
+        task: (id) => store.task(id),
+      });
+      return role !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Known without asking bb: the dossier, or configure this process. */
+  function knownAgent(threadId: string): boolean {
+    if (chatOf(threadId) !== null) return true;
+    const task = store.taskByThread(threadId);
+    if (task !== null) return task.closedAt === null;
+    return store.child(threadId) !== null || configuredAgents.has(threadId);
+  }
+
+  /** The Orchestrator's agent turns running now: what a stopped relay waits for. */
+  async function activeAgentTurns(): Promise<number> {
+    const running = await bb.sdk.threads.listRunning();
+    return running.filter((thread) => routedThreads.has(thread.id) || knownAgent(thread.id)).length;
+  }
+
+  bb.providers.experimental_contributeEnv("claude-code", async ({ threadId, projectId, hostId }) => {
+    const agent = await orchestratorAgent(threadId, projectId);
+    const entries = agent ? agentEnv({ agent, reading: await routeReading(hostId), now: Date.now() }) : [];
+    if (entries.length > 0) routedThreads.add(threadId);
+    return entries;
   });
 
   // ---------------------------------------------------------------- events
@@ -4336,9 +4465,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   /**
    * Headroom (headroom.ts; the host does the work): one beat per liveness
-   * check, routing every project's main checkout and every open task's
-   * worktree on this host through the proxy while it is healthy. A failed
-   * call keeps the last view.
+   * check. It keeps Headroom and the relay up (or stops a stopped relay once
+   * no agent turn is active), and removes the first version's settings key
+   * from every project's main checkout and open task's worktree on this host,
+   * once. Its route reading feeds the contributeEnv resolver. A failed call
+   * keeps the last view.
    */
   async function checkHeadroom(): Promise<LivenessView["headroom"]> {
     try {
@@ -4354,7 +4485,13 @@ export default async function plugin(bb: BbPluginApi) {
       for (const task of store.tasks({ includeClosed: false })) {
         if (task.worktreePath !== null) checkouts.push(task.worktreePath);
       }
-      const beat = await host.call("headroomBeat", { checkouts: [...new Set(checkouts)].slice(0, 200) }, { hostId, timeoutMs: 25_000 });
+      const generation = routeGeneration;
+      const beat = await host.call(
+        "headroomBeat",
+        { checkouts: [...new Set(checkouts)].slice(0, 200), pluginRoot: PLUGIN_ROOT, activeAgentTurns: await activeAgentTurns() },
+        { hostId, timeoutMs: 45_000 },
+      );
+      if (generation === routeGeneration) routeReadings.set(hostId, { ...beat.route, at: Date.now() });
       for (const skip of beat.skipped) {
         const key = `${skip.path}\n${skip.reason}`;
         if (headroomSkipsLogged.has(key)) continue;
@@ -4426,9 +4563,18 @@ export default async function plugin(bb: BbPluginApi) {
     headroom_control: async ({ action }) => {
       const hostId = (await bb.sdk.system.config()).primaryHostId ?? null;
       if (hostId === null) throw new Error("no host is connected");
-      await host.call("headroomControl", { action }, { hostId, timeoutMs: 20_000 });
+      // Stop: no new thread is routed from this moment, before the host has answered.
+      routeGeneration += 1;
+      routeReadings.clear();
+      if (action === "stop") routeReadings.set(hostId, { enabled: false, relayHealthy: false, at: Date.now() });
+      const result = await host.call(
+        "headroomControl",
+        { action, pluginRoot: PLUGIN_ROOT, activeAgentTurns: await activeAgentTurns() },
+        { hostId, timeoutMs: 45_000 },
+      );
+      if (result.relayWaits !== null) bb.log.info(`headroom: stopped; the relay stays up, ${result.relayWaits}`);
       void checkLiveness();
-      return { ok: true as const };
+      return { ok: true as const, relayWaits: result.relayWaits };
     },
 
     agent_restart: async ({ taskId: id }) => {

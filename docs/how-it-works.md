@@ -550,10 +550,16 @@ Jev one question: does this agent need Sonnet or Opus? (`modelroute.ts`)
 - **Never in the way.** One request to TypeSafe, capped at 2 s, no retry.
   After a timeout or an error, nothing is asked for 5 minutes. A failure
   never stops a spawn.
-- **The key.** `JEV_API_KEY=...` in `~/.config/the-orchestrator/jev.env`,
-  outside every repo. Only the host reads it, at most once a minute, so a new
-  key works without a reload. A file group or others can read is refused:
-  `chmod 600` it. The key goes only in the Authorization header to
+- **The key.** `JEV_API_KEY=...` in `~/.config/the-orchestrator/jev.env` when
+  that file exists (it alone decides then), else in The Orchestrator repo's
+  own `.env`: the main checkout of its land: "main" project, found from that
+  project's local source like every other checkout (never a worktree's, never
+  hard-coded). Sam decided the repo `.env` on 4 Oct 2026. Only the host reads
+  them, at most once a minute, so a new key works without a reload. A file
+  group or others can read is refused, and the board names it:
+  `chmod 600 <path>`. A repo `.env` that git tracks (`git ls-files
+  --error-unmatch`, or a check that fails) is refused too; `.gitignore`
+  ignores `.env`. The key goes only in the Authorization header to
   `https://api.typesafe.ai`; it is never logged, stored or shown.
 - **What leaves the Mac.** Task titles, briefs, research questions and build
   instructions of every project go to TypeSafe in the US. Sam decided this on
@@ -596,43 +602,100 @@ until the project has a row.
 
 ## Headroom (fewer tokens per request)
 
-Every agent The Orchestrator runs (Patches chats, task, research and build
-threads, in every project) sends its requests through Headroom, a local proxy
-that compresses what Claude Code sends (`headroom.ts`). It runs in cache mode,
-so earlier turns stay byte-identical and Claude's prompt cache still hits. Sam
-decided this on 2 Oct 2026.
+The Orchestrator's own agents (Patches chats, task, research and build
+threads, in every project) send their requests through Headroom, a local
+proxy that compresses what Claude Code sends (`headroom.ts`). It runs in
+cache mode, so earlier turns stay byte-identical and Claude's prompt cache
+still hits. Sam decided this on 2 Oct 2026. It is off until he starts it
+(`headroom_control start`); the stop is kept in
+`~/.local/share/the-orchestrator/headroom/state.json`.
 
-- **Fail open.** Agents reach it through `env.ANTHROPIC_BASE_URL =
-  "http://127.0.0.1:8791"` in `.claude/settings.local.json` of each project's
-  main checkout and each open task's worktree. That key is there only while
-  the proxy is healthy; down, not installed or stopped, it is taken out and
-  agents go straight to Claude. Only that one key changes; a file that does
-  not parse, or a checkout whose `.claude/` git does not ignore, is left
-  alone. An `ANTHROPIC_BASE_URL` the owner set is never changed or removed.
-  A Claude process reads its env when it starts, so a proxy that dies
-  mid-turn fails that turn's calls until the next beat restarts it.
-- **Private.** It listens on 127.0.0.1 only. Its upload of anonymous session
-  summaries to Headroom Labs and its telemetry are always off
+What went wrong the first time (2 Oct): the key went into every checkout's
+`.claude/settings.local.json`, main checkouts included, so Sam's own Claude
+Code sessions were routed too; then the proxy was killed and every session
+that had started with the URL failed (ECONNREFUSED). A session keeps the env
+it started with, so taking the key out again does not help it. Hence:
+
+- **Per thread, never settings files.** server.ts registers bb's provider env
+  for claude-code (`bb.providers.experimental_contributeEnv`). bb calls it for
+  every start, resume, fork and turn, with the thread's id. It returns
+  `ANTHROPIC_BASE_URL=http://127.0.0.1:8791` only when the thread is a Patches
+  chat, or a task, research or build thread (the dossier, or its spawn
+  metadata checked against the dossier, `roles.ts`), only while Headroom is
+  not stopped, and only when the relay answered its health check
+  (`/__relay/health`, 500 ms) in the last 10 s; an older reading is asked for
+  again. Everything else, Sam's own sessions first, gets nothing and goes
+  direct. bb's Claude Code bridge puts the entries in the session's env, and
+  when they change between turns it rebuilds the session before the next turn
+  ("Execution settings changed"), so a thread follows a stop or a dead relay
+  from its next turn on. No code writes the key into a settings file. The
+  only settings code left is a one-time cleanup: on each beat, for every
+  project's main checkout and open worktree whose `.claude/` git ignores, the
+  first version's key comes out where its value is exactly
+  `http://127.0.0.1:8791`, and the file is deleted only if it held nothing
+  else. A reused build worktree loses it too when it is re-guarded.
+- **A relay in front, so running sessions fail open.** Agents point at the
+  relay on 8791 (`headroomrelay.ts`), never at Headroom, which moved to 8792.
+  The relay is a separate node process (the host copies `headroomrelay.ts` to
+  `relay.mts` beside the install and starts it detached, own process group,
+  pid file `relay.pid`, log `relay.log`, PATH and HOME its only env), so a
+  plugin reload or a host restart leaves it running. It asks Headroom's
+  `/health` every 3 s (1 s timeout) and sends each request to Headroom while
+  that reading is healthy and under 10 s old, else straight to
+  `https://api.anthropic.com`. It pipes both ways, so server-sent events
+  stream as they come. Every header passes unchanged, Authorization and OAuth
+  included, except hop-by-hop headers and Host. A request Headroom refused to
+  connect (ECONNREFUSED: it never saw it) is sent again direct, once; any
+  failed connection to Headroom flips the relay to direct at once. It never
+  logs bodies, headers or auth. A Headroom crash, restart or stop now costs at
+  most the requests in flight to it.
+- **Stop, in order** (`headroom_control stop`, `stopPlan`): stopped is saved
+  first, so no new thread or turn is routed; then Headroom on 8792 (the relay
+  already goes direct without it); the relay last, only once no Orchestrator
+  agent turn is running and it has nothing in flight; until then it stays up
+  and each beat tries again (the board says it is waiting). Only pids whose
+  command line is ours are signalled (pid file or health, then `ps`; checked
+  again before each signal), TERM then KILL. `start` reverses it: the relay
+  at once, Headroom on the next beat.
+- **What remains.** If the relay itself dies, every routed call fails
+  (connection refused) until the next beat restarts it on the same port, up
+  to 30 s. A running session cannot be moved off it: its env was fixed when
+  it started. Claude Code's own retries of a failed call cover part of that
+  window, not all of it (how much was not measured: the build sandbox
+  blocked the live test), so a turn can fail. The thread's next turn goes
+  direct (the relay is not answering, so bb gives it no URL and rebuilds the
+  session). A request streaming through Headroom when Headroom dies is cut;
+  whatever Claude Code retries goes direct, since the relay flips at once.
+- **Private.** Both listen on 127.0.0.1 only. Headroom's upload of anonymous
+  session summaries to Headroom Labs and its telemetry are always off
   (`HEADROOM_BEACON=off HEADROOM_TELEMETRY=off DO_NOT_TRACK=1`). It still
   fetches a tokenizer file and LiteLLM's price list on first use.
 - **Installed and run by The Orchestrator.** The host installs the pinned
   `headroom-ai[proxy]==0.39.1` with uv on Python 3.12 under
   `~/.local/share/the-orchestrator/headroom/` (never `[all]`: torch and
   models), its output only in `install.log` there. A failed install is tried
-  again after an hour. The proxy starts detached in its own process group
-  with a pid file and logs to `proxy.log`, so a reload (every land) does not
-  stop it; the next host adopts it through `/health`.
-- **On the liveness beat** (30 s): not running, start it; unhealthy (`/health`
-  not 200, startup not ready, or no pid) two beats in a row, or over 1.5 GB,
-  restart it. At most 4 starts in 15 minutes; past that it stays down, and
-  after 30 minutes down it is one Needs you item with the log to read.
-  Only an explicit stop (`headroom_control`) keeps it off.
+  again after an hour. Headroom starts detached in its own process group with
+  a pid file and logs to `proxy.log`; the next host adopts it through
+  `/health`. In `ps` it shows as `<home>/.local/share/the-orchestrator/headroom/venv/bin/python -m headroom.cli proxy ...`
+  (or `venv/bin/headroom proxy`); the relay as
+  `node <home>/.local/share/the-orchestrator/headroom/relay.mts --orchestrator-relay ...`.
+  Nothing else matches (`isHeadroomProxy`, `isHeadroomRelay`).
+- **On the liveness beat** (30 s): Headroom not running, start it; unhealthy
+  (`/health` not 200, startup not ready, or no pid) two beats in a row, or
+  over 1.5 GB, restart it. At most 4 starts in 15 minutes; past that it stays
+  down, and after 30 minutes down it is one Needs you item with the log to
+  read. A dead relay starts at once; one alive but not answering for two
+  beats restarts; an older relay version is replaced only when nothing uses
+  it. Stopped: Headroom is stopped if it still runs, the relay as above.
 - **On the board.** One line in the header: "Headroom: on · 1.2M tokens
-  removed (8.6%)" from what compression measurably removed since the proxy
-  started (never Headroom's tool-list estimate), or installing, starting,
-  "down, agents go direct (why)", or off.
-- **Memory.** The proxy counts in the agent tree budget wherever it runs, but
-  the guard never kills it.
+  removed (8.6%)" from what compression measurably removed since Headroom
+  started (never its tool-list estimate), or installing, starting, "down,
+  agents go direct (why)", or "off, agents go direct".
+- **Memory.** Headroom and the relay count in the agent tree budget wherever
+  they run, but the guard never kills them.
+- **Another plugin.** bb's own Account Pooler plugin also gives claude-code an
+  `ANTHROPIC_BASE_URL` when it is on; the earlier registration wins and bb
+  logs the clash. Do not run both.
 
 ## Files
 
@@ -671,10 +734,11 @@ decided this on 2 Oct 2026.
 | `newproject.ts` | Add project: slug, name checks, first files, the private `gh repo create`, the visibility check |
 | `worktrees.ts` | Worktree naming, `.worktreeinclude`, cleanup rule, half-removed worktrees, the cleanup sweep |
 | `modelroute.ts` | Jev's model routing: the question, the scrub, the 0.7 gate, who is routed, the board's label and line |
-| `typesafe.ts` | TypeSafe's URL and model, reading `JEV_API_KEY` from `jev.env`, refusing a file others can read |
+| `typesafe.ts` | TypeSafe's URL and model, reading `JEV_API_KEY` from `jev.env` or the repo `.env`, refusing a file others can read or a tracked `.env` |
 | `jevwatch.ts` | Jev, watch only: the two questions, reading an answer, the host's bounded ask, the actual outcome, the agreement report |
 | `jev/` | The Jev box: `cli.ts` (up, down, status, dry-run), `policy.ts` (cap, watchdog, Verda bodies, ledger), `box/` (setup, Caddy, watchdog, AnyJev shim) |
-| `headroom.ts` | Headroom: the pinned install and run commands, the privacy env, reading `/health` and `/stats`, the start/restart rules, the settings key, the board's line |
+| `headroom.ts` | Headroom: the pinned install and run commands, the privacy env, reading `/health` and `/stats`, the start/restart rules, the relay's start/stop rules and stop order, which threads get the base URL, the ps matchers, the one-time settings cleanup, the board's line |
+| `headroomrelay.ts` | The relay on 8791: Headroom or direct per request, the headers it strips, streaming; node runs it directly as its own process |
 | `builderguard.ts` | The builder guard: the Bash hook's command policy and the worktree's sandbox settings; node runs it directly |
 
 ## Memory
@@ -685,7 +749,7 @@ started (the agent tree), every 10 s. At most 4 agents work at once; below
 with the reason), and `build` refuses below 30% or at 40%. At 55% of RAM in
 the tree, or one agent process at 25%, it kills the largest agent process
 with its process group (a shell's `cmd &` children go with it) and tells its
-thread; never claude, bb, the Headroom proxy, Chrome or anything under
+thread; never claude, bb, the Headroom proxy or relay, Chrome or anything under
 /Applications/. Below 10%
 free it stops the newest builder, then research, then tasks. It logs
 "memory guard: live" on its first reading and a heartbeat every 10 minutes.

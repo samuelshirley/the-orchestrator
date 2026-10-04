@@ -197,6 +197,9 @@ const killTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("pid"), pid: z.number().int().gt(1) }),
 ]);
 
+/** Why there is no Jev key (typesafe.ts KeyProblem). */
+const keyProblemSchema = z.enum(["missing", "open", "tracked"]);
+
 /** The board's Headroom line (headroom.ts headroomView). */
 export const headroomViewSchema = z
   .object({
@@ -207,11 +210,27 @@ export const headroomViewSchema = z
   .strict();
 export type HeadroomViewOutput = z.infer<typeof headroomViewSchema>;
 
+/** Whether a thread starting now goes through the relay (headroom.ts agentEnv's reading). */
+const headroomRouteSchema = z.object({ enabled: z.boolean(), relayHealthy: z.boolean() }).strict();
+
+const headroomBeatInputSchema = z
+  .object({
+    /** Checkouts for the one-time settings cleanup: every project's main checkout and open worktree on this host. */
+    checkouts: z.array(path).max(200),
+    /** The plugin's source (headroomrelay.ts lives there), or null when it is not on this machine. */
+    pluginRoot: path.nullable(),
+    /** The Orchestrator's agent turns running now: a stopped relay waits for none. */
+    activeAgentTurns: z.number().int().min(0).max(1000),
+  })
+  .strict();
+export type HeadroomBeatInput = z.infer<typeof headroomBeatInputSchema>;
+
 const headroomBeatOutputSchema = z
   .object({
     view: headroomViewSchema,
-    /** Checkouts left alone this beat, and why. */
+    /** Checkouts the cleanup left alone this beat, and why. */
     skipped: z.array(z.object({ path: text(1000), reason: text(300) }).strict()).max(50),
+    route: headroomRouteSchema,
   })
   .strict();
 export type HeadroomBeatOutput = z.infer<typeof headroomBeatOutputSchema>;
@@ -411,28 +430,32 @@ export const hostContract = defineRpcContract({
   },
   /**
    * Jev picks an agent's model (modelroute.ts): TypeSafe only, with the key
-   * from ~/.config/the-orchestrator/jev.env (typesafe.ts), "no-key" with no
-   * call when there is none or the file is open to others. One POST capped
+   * from ~/.config/the-orchestrator/jev.env, else `.env` in `checkout` (The
+   * Orchestrator's main checkout; typesafe.ts jevKey), "no-key" with no call
+   * when there is none, the file is open to others or git tracks it. One POST capped
    * at JEV_TIMEOUT_MS, no retry. Every outcome is a value, never a throw, and
    * no error carries the response body or the key. `state` comes scrubbed
    * from the server (modelroute.ts routeState).
    */
   modelRoute: {
-    input: z.object({ state: z.string().min(1).max(4000) }).strict(),
+    input: z.object({ state: z.string().min(1).max(4000), checkout: path.nullable() }).strict(),
     output: z.union([
       z.object({ ok: z.literal(true), latencyMs: z.number().int().min(0), model: text(80).nullable(), answer: jevAnswerSchema }).strict(),
-      z.object({ ok: z.literal(false), kind: z.literal("no-key"), problem: z.enum(["missing", "open"]) }).strict(),
+      z.object({ ok: z.literal(false), kind: z.literal("no-key"), problem: keyProblemSchema }).strict(),
       z
         .object({ ok: z.literal(false), kind: z.enum(["error", "timeout"]), error: text(300), latencyMs: z.number().int().min(0) })
         .strict(),
     ]),
   },
-  /** Whether jev.env holds a usable key (typesafe.ts keyFromFile). Presence only: the key never leaves the host. */
+  /**
+   * Whether there is a usable key (typesafe.ts jevKey) and which file it is
+   * in or about. Presence and a path only: the key never leaves the host.
+   */
   routeKeyStatus: {
-    input: z.object({}).strict(),
+    input: z.object({ checkout: path.nullable() }).strict(),
     output: z.union([
-      z.object({ present: z.literal(true) }).strict(),
-      z.object({ present: z.literal(false), problem: z.enum(["missing", "open"]) }).strict(),
+      z.object({ present: z.literal(true), file: text(1000) }).strict(),
+      z.object({ present: z.literal(false), problem: keyProblemSchema, file: text(1000).nullable() }).strict(),
     ]),
   },
   /** Kill every process whose cwd is inside a task worktree (a stopped builder's leftovers). */
@@ -690,19 +713,31 @@ export const hostContract = defineRpcContract({
     output: z.object({ ok: z.boolean(), error: text(200).nullable() }).strict(),
   },
   /**
-   * One liveness beat for the Headroom proxy (headroom.ts): install, start or
-   * restart it as headroomStep says, then put ANTHROPIC_BASE_URL in each
-   * checkout's .claude/settings.local.json while it is healthy and take ours
-   * out while it is not (never one the owner set; never in a checkout whose
-   * .claude/ git does not ignore). The install runs in the background.
+   * One liveness beat for Headroom and its relay (headroom.ts): install,
+   * start or restart Headroom as headroomStep says, start a dead relay at
+   * once, stop a stopped one only when no agent turn is active (relayStep),
+   * and remove the first version's ANTHROPIC_BASE_URL from each checkout's
+   * .claude/settings.local.json once (only where the value is exactly that
+   * version's URL). Writes the key nowhere. The install runs in the background.
    */
   headroomBeat: {
-    input: z.object({ checkouts: z.array(path).max(200) }).strict(),
+    input: headroomBeatInputSchema,
     output: headroomBeatOutputSchema,
   },
-  /** The owner's explicit stop, or start again; nothing else stops the proxy for good. */
+  /** Whether a thread starting now is routed: not stopped, and the relay answered within 500 ms. */
+  headroomRoute: {
+    input: z.object({}).strict(),
+    output: headroomRouteSchema,
+  },
+  /**
+   * The owner's explicit stop, or start again (headroom.ts stopPlan): stopped
+   * saved, Headroom stopped, the relay stopped only once no agent turn is
+   * active (relayWaits says why not yet). Nothing else stops them for good.
+   */
   headroomControl: {
-    input: z.object({ action: z.enum(["stop", "start"]) }).strict(),
-    output: z.object({ ok: z.literal(true) }).strict(),
+    input: z
+      .object({ action: z.enum(["stop", "start"]), pluginRoot: path.nullable(), activeAgentTurns: z.number().int().min(0).max(1000) })
+      .strict(),
+    output: z.object({ ok: z.literal(true), relayWaits: text(200).nullable() }).strict(),
   },
 });

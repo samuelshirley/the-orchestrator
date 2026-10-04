@@ -395,11 +395,24 @@ describe("tree budget: pickProcessKill", () => {
   });
 });
 
-describe("the Headroom proxy in the tree budget", () => {
-  const PROXY = "/Users/sam/.local/share/the-orchestrator/headroom/venv/bin/python /Users/sam/.local/share/the-orchestrator/headroom/venv/bin/headroom proxy --host 127.0.0.1 --port 8791 --mode cache";
-  it("is never killed, but an agent's own `headroom proxy` elsewhere is", () => {
+describe("the Headroom proxy and relay in the tree budget", () => {
+  // As ps shows the proxy on the owner's Mac, and the relay as the host starts it.
+  const PROXY = "/Users/sam/.local/share/the-orchestrator/headroom/venv/bin/python -m headroom.cli proxy --host 127.0.0.1 --port 8792 --mode cache";
+  const RELAY = "/opt/homebrew/bin/node /Users/sam/.local/share/the-orchestrator/headroom/relay.mts --orchestrator-relay --host 127.0.0.1 --port 8791 --headroom-port 8792";
+  it("are never killed, but an agent's own `headroom proxy` or node elsewhere is", () => {
     expect(neverKill(PROXY)).toBe(true);
+    expect(neverKill("/Users/sam/.local/share/the-orchestrator/headroom/venv/bin/headroom proxy --port 8792")).toBe(true);
+    expect(neverKill(RELAY)).toBe(true);
     expect(neverKill("/tmp/venv/bin/headroom proxy --port 9000")).toBe(false);
+    expect(neverKill("/Users/sam/other/.venv/bin/python -m headroom.cli proxy --port 9000")).toBe(false);
+    expect(neverKill("headroom proxy --port 9000")).toBe(false);
+    expect(neverKill("node /tmp/relay.mts --orchestrator-relay")).toBe(false);
+  });
+  it("counts the relay in the tree after a reload leaves it to launchd", () => {
+    const adopted = [...machine(), row(30010, 1, 30010, 0.05, RELAY)];
+    expect(treeOf(adopted).has(30010)).toBe(true);
+    const hog = heavy(10, { pid: 30010, command: RELAY, target: { kind: "pid", pid: 30010 } });
+    expect(pickProcessKill(tree(15, [hog]), null, NOW)).toBeNull();
   });
   it("counts in the tree whether the host started it or launchd adopted it after a reload", () => {
     const started = [...machine(), row(30000, 17678, 30000, 0.9, PROXY)];

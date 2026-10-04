@@ -507,12 +507,12 @@ function UsageStatus({ usage }: { usage: LivenessView["usage"] }) {
   );
 }
 
-/** "Headroom: on · 1.2M tokens removed (8.6%)" in the header (headroom.ts headroomView); amber while it is down. */
+/** "Headroom: on · 1.2M tokens removed (8.6%)" in the header (headroom.ts headroomView); amber while it or its relay is down. */
 function HeadroomStatus({ headroom }: { headroom: LivenessView["headroom"] }) {
   if (headroom === null) return null;
   return (
     <span
-      title={`${headroom.line}. Every agent's requests go through the local Headroom proxy while it is healthy; when it is not, they go straight to Claude.`}
+      title={`${headroom.line}. The Orchestrator's own agents (Patches, tasks, research, builds) send their requests through a local relay, to Headroom while it is healthy and straight to Claude when it is not. Your own Claude sessions never go through it.`}
       className={cn("orc-headroom min-w-0 truncate", headroom.state === "down" && "orc-live-waiting")}
     >
       {headroom.line}
@@ -574,14 +574,17 @@ function ModelRoutingLine({
 }) {
   const now = useNow(60_000);
   if (routeKey === null || projectId === null) return null;
-  const line = routingLine(
-    routes.filter((route) => route.projectId === projectId),
-    now,
-    routeKey,
-  );
+  // No usable key: the line names the file and what to do (typesafe.ts keyProblemText).
+  const line = routeKey.present
+    ? routingLine(
+        routes.filter((route) => route.projectId === projectId),
+        now,
+        routeKey,
+      )
+    : `Jev model routing: off. ${keyProblemText(routeKey.problem, routeKey.file)}`;
   const detail = routeKey.present
     ? `Jev picks Sonnet for a task, research or build agent when it is at least ${SONNET_THRESHOLD} sure; anything else keeps the provider default. Patches always does.`
-    : keyProblemText(routeKey.problem);
+    : keyProblemText(routeKey.problem, routeKey.file);
   return (
     <div className="border-b border-border px-3 py-2">
       <p className="text-xs text-muted-foreground" title={detail}>

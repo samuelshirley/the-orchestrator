@@ -21,15 +21,16 @@
 //      PROCESS_KILL_FRACTION) the largest one is killed with its process
 //      group, so `cmd &` siblings go together. Never claude, bb, Chrome or
 //      anything under /Applications/.
-//   5. The Headroom proxy (headroom.ts) is infrastructure: its memory counts
-//      in the tree even after a reload leaves it to launchd, but the guard
-//      never kills it; headroom.ts restarts it over 1.5 GB.
+//   5. The Headroom proxy and its relay (headroom.ts) are infrastructure:
+//      their memory counts in the tree even after a reload leaves them to
+//      launchd, but the guard never kills them (killing the relay would cut
+//      every routed agent's call); headroom.ts restarts the proxy over 1.5 GB.
 //
 // A memory reading that is missing or stale counts as "cannot tell", and
 // cannot-tell waits: a broken sensor must show up as queued work with its
 // reason, never as a silently disabled guard.
 
-import { isHeadroomProxy } from "./headroom.js";
+import { isHeadroomProcess } from "./headroom.js";
 
 /** Queue new agent turns below this % free (macOS kern.memorystatus_level). */
 export const DISPATCH_MIN_FREE = 20;
@@ -221,12 +222,12 @@ export function isClaude(command: string): boolean {
   );
 }
 
-/** Never killed by the guard: bb, claude, the Headroom proxy, and (defense in depth) the owner's apps and Chrome. */
+/** Never killed by the guard: bb, claude, the Headroom proxy and relay, and (defense in depth) the owner's apps and Chrome. */
 export function neverKill(command: string): boolean {
   return (
     isBbRoot(command) ||
     isClaude(command) ||
-    isHeadroomProxy(command) ||
+    isHeadroomProcess(command) ||
     command.startsWith("/Applications/") ||
     command.startsWith("/System/")
   );
@@ -236,7 +237,7 @@ export function neverKill(command: string): boolean {
  * Pids of everything bb's agents started: every descendant of a bb root
  * (not the roots), plus processes adopted by launchd that still carry an
  * agent's BB_THREAD_ID (a stopped thread's `cmd &` survivors) and theirs,
- * plus the Headroom proxy wherever it runs (a reload leaves it to launchd).
+ * plus the Headroom proxy and relay wherever they run (a reload leaves them to launchd).
  */
 export function agentTree(rows: readonly PsRow[], isRoot: (row: PsRow) => boolean, adopted: ReadonlySet<number> = new Set()): Set<number> {
   const children = new Map<number, number[]>();
@@ -251,7 +252,7 @@ export function agentTree(rows: readonly PsRow[], isRoot: (row: PsRow) => boolea
   const groups = new Set(rows.filter((row) => adopted.has(row.pid)).map((row) => row.pgid));
   const orphans = rows.filter((row) => row.ppid === 1 && groups.has(row.pgid) && !neverKill(row.command)).map((row) => row.pid);
   const seen = new Set<number>();
-  const proxies = rows.filter((row) => isHeadroomProxy(row.command)).map((row) => row.pid);
+  const proxies = rows.filter((row) => isHeadroomProcess(row.command)).map((row) => row.pid);
   const queue = [...roots, ...adopted, ...orphans, ...proxies];
   while (queue.length > 0) {
     const pid = queue.pop() as number;
