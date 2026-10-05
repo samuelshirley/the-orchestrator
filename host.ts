@@ -29,6 +29,8 @@
 // (setupwizard.ts): setupFacts and listRepos only read; saveSetup is the one
 // write to ~/.config/the-orchestrator/config.json, the folder and the name
 // merged into the file as it is, never over a file that has a problem.
+// retireLegacyRoute stops the removed token proxy's leftover processes by
+// verified pid and then removes its install dir, that path only (legacyroute.ts).
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { constants as fsConstants, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -38,7 +40,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readdir,
   readFile,
   realpath,
@@ -64,45 +65,24 @@ import {
   type RepoSnapshot,
   type AiVoiceTranscribeInput,
   type AiVoiceTranscribeOutput,
-  type HeadroomBeatInput,
-  type HeadroomBeatOutput,
+  type RetireLegacyOutput,
 } from "./contract.js";
 import { SIGN_IN_ARGS, SIGN_IN_TIMEOUT_MS, signInPathDirs, signInSpawnError } from "./signin.js";
 import { killAgentProcess, readMemory } from "./memory-probe.js";
 import { builderSettings, envPatternsOf, guardHookCommand } from "./builderguard.js";
 import {
-  HEADROOM_URL,
-  HEADROOM_VERSION,
-  INSTALL_TIMEOUT_MS,
-  NO_RELAY,
-  OFF_FOR_GOOD,
-  PROBE_TIMEOUT_MS,
-  RELAY_HEALTH_PATH,
-  RELAY_PROBE_TIMEOUT_MS,
-  RELAY_URL,
-  cleanupSettingsText,
-  controlRefusal,
-  headroomPaths,
-  headroomStep,
-  headroomView,
-  installSteps,
-  isHeadroomProxy,
-  isHeadroomRelay,
-  parseHealth,
-  parseRelayHealth,
-  parseState,
-  parseStats,
-  relayArgv,
-  relayEnv,
-  relayStep,
-  runArgv,
-  runEnv,
-  stopPlan,
+  LEGACY_PROXY_URL,
+  LEGACY_RELAY_HEALTH_PATH,
+  LEGACY_RELAY_URL,
+  isLegacyProxy,
+  isLegacyRelay,
+  legacyPaths,
+  parseLegacyProxyHealth,
+  parseLegacyRelayHealth,
+  removableDir,
+  retirePlan,
   withoutLegacyRoute,
-  type HeadroomState,
-  type Health,
-  type RelayReading,
-} from "./headroom.js";
+} from "./legacyroute.js";
 import {
   GH_LOGIN_ARGS,
   SLUG_PATTERN,
@@ -200,8 +180,8 @@ async function writeBuilderGuard(
   } catch {
     // None yet, or not JSON (Claude Code couldn't read it either): start fresh.
   }
-  // A reused worktree may still carry the first Headroom version's base URL:
-  // it goes (headroom.ts withoutLegacyRoute). Routing is per thread now.
+  // A reused worktree may still carry the removed proxy's base URL: it goes
+  // (legacyroute.ts withoutLegacyRoute).
   if (typeof existing === "object" && existing !== null && !Array.isArray(existing)) {
     existing = withoutLegacyRoute(existing as Record<string, unknown>) ?? existing;
   }
@@ -215,66 +195,19 @@ async function writeBuilderGuard(
   await writeFile(file, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
-// ---------------------------------------------------------------- Headroom
-// headroom.ts holds the policy; here: the install (output only to its log),
-// Headroom on HEADROOM_PORT and the relay (headroomrelay.ts) on RELAY_PORT,
-// each detached (own process group, pid file) so a plugin reload leaves it
-// running and the next host adopts it, health and stats with short timeouts,
-// and the one-time removal of the first version's settings.local.json key.
-// Routing itself is per thread: server.ts asks headroomRoute. Nothing here
-// writes ANTHROPIC_BASE_URL anywhere.
+// ------------------------------------------------- the removed proxy's leftovers
+// legacyroute.ts holds the policy (retirePlan); here the IO, one liveness beat
+// at a time until it says done: read both health endpoints with short
+// timeouts, confirm each pid with ps, stop by verified pid only (TERM, then
+// KILL), and remove the install dir once both are confirmed gone. Starts
+// nothing and writes nothing.
 
-const headroom = {
-  paths: headroomPaths(homedir()),
-  state: null as HeadroomState | null,
-  installing: false,
-  /** Headroom answered healthy on the last beat. */
-  up: false,
-  /** The relay answered on the last beat. */
-  relayUp: false,
-  /** Why the relay is down, or why a stopped one is still up. */
-  relayNote: null as string | null,
-  relayUnhealthyBeats: 0,
-  beating: false,
-  /** Checkouts whose .claude/ git ignores (only those are touched), by path. */
-  ignored: new Map<string, boolean>(),
-  /** Checkouts the one-time settings cleanup has done, this host process. */
-  cleaned: new Set<string>(),
-};
-
-async function headroomState(): Promise<HeadroomState> {
-  if (headroom.state === null) {
-    headroom.state = parseState(await readFile(headroom.paths.stateFile, "utf8").catch(() => null));
-  }
-  return headroom.state;
-}
-
-async function saveHeadroomState(state: HeadroomState): Promise<void> {
-  const before = JSON.stringify(headroom.state);
-  headroom.state = state;
-  if (JSON.stringify(state) === before && existsSync(headroom.paths.stateFile)) return;
-  await mkdir(headroom.paths.dir, { recursive: true });
-  await writeAtomically(headroom.paths.stateFile, `${JSON.stringify(state)}\n`);
-}
-
-async function writeAtomically(file: string, text: string): Promise<void> {
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, text);
-  try {
-    await rename(tmp, file);
-  } catch (error) {
-    await rm(tmp, { force: true });
-    throw error;
-  }
-}
+const legacy = legacyPaths(homedir());
 
 async function localGet(url: string, timeoutMs: number, signal: AbortSignal): Promise<{ status: number; body: unknown } | null> {
   try {
-    const response = await fetch(url, {
-      signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-      redirect: "error",
-    });
-    const text = (await response.text()).slice(0, 2_000_000);
+    const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]), redirect: "error" });
+    const text = (await response.text()).slice(0, 100_000);
     let body: unknown = null;
     try {
       body = JSON.parse(text);
@@ -287,46 +220,30 @@ async function localGet(url: string, timeoutMs: number, signal: AbortSignal): Pr
   }
 }
 
-const headroomGet = (path: string, signal: AbortSignal) => localGet(`${HEADROOM_URL}${path}`, PROBE_TIMEOUT_MS, signal);
-
-async function relayReading(signal: AbortSignal, timeoutMs: number): Promise<RelayReading> {
-  const reply = await localGet(`${RELAY_URL}${RELAY_HEALTH_PATH}`, timeoutMs, signal);
-  return reply === null ? NO_RELAY : parseRelayHealth(reply.status, reply.body);
-}
-
-/** pgid, rss and command of a live pid, or null. */
-async function processFacts(pid: number, signal: AbortSignal): Promise<{ pgid: number; rssBytes: number; command: string } | null> {
+/** pgid and command of a live pid, or null. */
+async function processFacts(pid: number, signal: AbortSignal): Promise<{ pgid: number; command: string } | null> {
   const out = await new Promise<string | null>((done) =>
-    execFile("/bin/ps", ["-o", "pgid=,rss=,command=", "-p", String(pid)], { signal, timeout: 5_000 }, (error, stdout) =>
-      done(error ? null : stdout),
-    ),
+    execFile("/bin/ps", ["-o", "pgid=,command=", "-p", String(pid)], { signal, timeout: 5_000 }, (error, stdout) => done(error ? null : stdout)),
   );
-  const match = out === null ? null : /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/m.exec(out);
-  if (match === null) return null;
-  return { pgid: Number(match[1]), rssBytes: Number(match[2]) * 1024, command: match[3]! };
+  const match = out === null ? null : /^\s*(\d+)\s+(.+?)\s*$/m.exec(out);
+  return match === null ? null : { pgid: Number(match[1]), command: match[2]! };
 }
 
-/** The pid one of ours runs as: the one its health names, else its pid file's, only while the command line is ours. */
+/** The pid one of them runs as: the one its health names, else its pid file's, only while ps shows its command line. */
 async function verifiedPid(named: number | null, pidFile: string, ours: (command: string) => boolean, signal: AbortSignal): Promise<number | null> {
   const fromFile = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
   for (const pid of [named, Number.isInteger(fromFile) && fromFile > 1 ? fromFile : null]) {
     if (pid === null) continue;
     const facts = await processFacts(pid, signal);
-    if (facts !== null && ours(facts.command)) {
-      if (pid !== fromFile) await writeFile(pidFile, `${pid}\n`).catch(() => undefined);
-      return pid;
-    }
+    if (facts !== null && ours(facts.command)) return pid;
   }
   return null;
 }
 
-const headroomPid = (health: Health, signal: AbortSignal) => verifiedPid(health.pid, headroom.paths.pidFile, isHeadroomProxy, signal);
-const relayPid = (reading: RelayReading, signal: AbortSignal) => verifiedPid(reading.pid, headroom.paths.relayPidFile, isHeadroomRelay, signal);
-
 /**
- * Stop one of ours: its own group (it was started detached), TERM, then KILL
- * after `graceMs`. Only a pid whose command line `ours` matches, checked
- * again right before each signal.
+ * Stop one of them: its own group when it leads one (both were started
+ * detached), TERM, then KILL after `graceMs`. Only while ps shows its command
+ * line, checked again right before each signal.
  */
 async function stopVerified(pid: number, ours: (command: string) => boolean, graceMs: number, signal: AbortSignal): Promise<void> {
   const facts = await processFacts(pid, signal);
@@ -350,270 +267,41 @@ async function stopVerified(pid: number, ours: (command: string) => boolean, gra
   }
 }
 
-const stopHeadroomProxy = (pid: number, signal: AbortSignal) => stopVerified(pid, isHeadroomProxy, 5_000, signal);
-/** The relay drains what is in flight on TERM (at most 10 s) before it leaves. */
-const stopRelay = (pid: number, signal: AbortSignal) => stopVerified(pid, isHeadroomRelay, 12_000, signal);
+let retiring = false;
 
-const HEADROOM_LOG_MAX_BYTES = 10 * 1024 ** 2;
-
-async function openLog(file: string) {
-  await mkdir(headroom.paths.dir, { recursive: true });
-  const size = await stat(file).then((s) => s.size, () => 0);
-  if (size > HEADROOM_LOG_MAX_BYTES) await rename(file, `${file}.1`).catch(() => undefined);
-  return open(file, "a");
-}
-
-/** Start a detached process that outlives this host; its output goes to its log, its pid to its pid file. */
-async function startDetached(argv: string[], env: Record<string, string>, logFile: string, pidFile: string, label: string): Promise<void> {
-  const log = await openLog(logFile);
+async function retireLegacyRoute({ activeAgentTurns }: { activeAgentTurns: number }, signal: AbortSignal): Promise<RetireLegacyOutput> {
+  if (retiring) return { done: false, waits: "the last beat's retirement is still running", stopped: [], removed: null };
+  retiring = true;
   try {
-    const [command, ...args] = argv;
-    const child = spawn(command!, args, { cwd: headroom.paths.dir, env, detached: true, stdio: ["ignore", log.fd, log.fd] });
-    child.on("error", (error) => console.warn(`headroom: ${label} start failed: ${error.message}`));
-    child.unref();
-    if (child.pid !== undefined) await writeFile(pidFile, `${child.pid}\n`);
+    const relayReply = await localGet(`${LEGACY_RELAY_URL}${LEGACY_RELAY_HEALTH_PATH}`, 3_000, signal);
+    const relay = parseLegacyRelayHealth(relayReply?.status ?? null, relayReply?.body ?? null);
+    const proxyReply = await localGet(`${LEGACY_PROXY_URL}/health`, 3_000, signal);
+    const proxyNamed = parseLegacyProxyHealth(proxyReply?.status ?? null, proxyReply?.body ?? null);
+    const relayPid = await verifiedPid(relay?.pid ?? null, legacy.relayPidFile, isLegacyRelay, signal);
+    const proxyPid = await verifiedPid(proxyNamed, legacy.proxyPidFile, isLegacyProxy, signal);
+    const dirExists = await lstat(legacy.dir).then((s) => s.isDirectory(), () => false);
+    const plan = retirePlan({ proxyNamed, proxyPid, relay, relayPid, activeAgentTurns, dirExists });
+
+    const stopped: RetireLegacyOutput["stopped"] = [];
+    if (plan.stopProxy && proxyPid !== null) {
+      await stopVerified(proxyPid, isLegacyProxy, 5_000, signal);
+      stopped.push({ what: "proxy", pid: proxyPid });
+    }
+    // The relay drains what is in flight on TERM (at most 10 s) before it leaves.
+    if (plan.stopRelay && relayPid !== null) {
+      await stopVerified(relayPid, isLegacyRelay, 12_000, signal);
+      stopped.push({ what: "relay", pid: relayPid });
+    }
+    let removed: string | null = null;
+    if (plan.removeDir && removableDir(legacy.dir, homedir())) {
+      await rm(legacy.dir, { recursive: true, force: true });
+      removed = legacy.dir;
+    }
+    const done = plan.gone && !(await lstat(legacy.dir).then(() => true, () => false));
+    return { done, waits: plan.waits === null ? null : clip(plan.waits, 400), stopped, removed };
   } finally {
-    await log.close();
+    retiring = false;
   }
-}
-
-async function startHeadroomProxy(): Promise<void> {
-  await startDetached(runArgv(headroom.paths), runEnv(process.env), headroom.paths.log, headroom.paths.pidFile, "proxy");
-}
-
-/** headroomrelay.ts in the plugin's source, when this machine has it. */
-function relaySource(pluginRoot: string | null): string | null {
-  if (pluginRoot === null) return null;
-  const file = join(pluginRoot, "headroomrelay.ts");
-  return existsSync(file) ? file : null;
-}
-
-const canStartRelay = (pluginRoot: string | null) => relaySource(pluginRoot) !== null || existsSync(headroom.paths.relayScript);
-
-/** node for the relay: this process's when it is node, else the one on PATH. */
-function nodeBinary(): string {
-  return /^node(\d+)?$/.test(base(process.execPath)) ? process.execPath : "node";
-}
-
-/**
- * The relay, as its own process: headroomrelay.ts copied to relay.mts (a
- * land never changes the file it runs), run by node with type stripping,
- * PATH and HOME its only environment.
- */
-async function startRelayProcess(pluginRoot: string | null): Promise<void> {
-  const source = relaySource(pluginRoot);
-  await mkdir(headroom.paths.dir, { recursive: true });
-  if (source !== null) await writeAtomically(headroom.paths.relayScript, await readFile(source, "utf8"));
-  if (!existsSync(headroom.paths.relayScript)) throw new Error("no relay script on this machine");
-  await startDetached(relayArgv(headroom.paths, nodeBinary()), relayEnv(setupEnv(process.env)), headroom.paths.relayLog, headroom.paths.relayPidFile, "relay");
-}
-
-/** The install, in the background: each step's output only to install.log, the whole bounded by INSTALL_TIMEOUT_MS. */
-function installHeadroom(): void {
-  if (headroom.installing) return;
-  headroom.installing = true;
-  const { paths } = headroom;
-  const deadline = Date.now() + INSTALL_TIMEOUT_MS;
-  void (async () => {
-    await mkdir(paths.dir, { recursive: true });
-    const log = await open(paths.installLog, "w");
-    try {
-      const python = existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
-      for (const step of installSteps(paths, python)) {
-        if (step.creates !== null && existsSync(step.creates)) continue;
-        await log.write(`$ ${step.argv.join(" ")}\n`);
-        const code = await new Promise<number | string>((done) => {
-          const [command, ...args] = step.argv;
-          const child = spawn(command!, args, {
-            cwd: paths.dir,
-            env: { ...setupEnv(process.env), ...step.env },
-            stdio: ["ignore", log.fd, log.fd],
-            timeout: Math.max(1_000, deadline - Date.now()),
-            killSignal: "SIGKILL",
-          });
-          child.on("error", (error) => done(error.message));
-          child.on("exit", (exitCode, signalName) => done(exitCode ?? `killed by ${signalName ?? "a signal"}`));
-        });
-        if (code !== 0) {
-          throw new Error(
-            typeof code === "string" ? `${base(step.argv[0]!)} ${step.argv[1]}: ${code}` : `${base(step.argv[0]!)} ${step.argv[1]} exited ${code}`,
-          );
-        }
-      }
-      if (!existsSync(paths.bin)) throw new Error(`the install finished without ${paths.bin}`);
-      await writeFile(paths.marker, `${HEADROOM_VERSION}\n`);
-      await saveHeadroomState({ ...(await headroomState()), installFailedAt: null, installError: null });
-    } catch (error) {
-      const message = clip(error instanceof Error ? error.message : String(error), 300);
-      await log.write(`\nfailed: ${message}\n`).catch(() => undefined);
-      await saveHeadroomState({ ...(await headroomState()), installFailedAt: Date.now(), installError: message });
-    } finally {
-      await log.close();
-      headroom.installing = false;
-    }
-  })().catch((error: unknown) => {
-    headroom.installing = false;
-    console.warn(`headroom: install failed: ${error instanceof Error ? error.message : String(error)}`);
-  });
-}
-
-function base(path: string): string {
-  return path.replace(/.*\//, "");
-}
-
-async function headroomInstalled(): Promise<boolean> {
-  const marker = (await readFile(headroom.paths.marker, "utf8").catch(() => "")).trim();
-  return marker === HEADROOM_VERSION && existsSync(headroom.paths.bin);
-}
-
-/**
- * The one-time cleanup of one checkout's .claude/settings.local.json: the
- * first version's ANTHROPIC_BASE_URL out where its value is exactly that
- * version's URL (headroom.ts cleanupSettingsText), the file deleted only when
- * it held nothing but that key. Never in a checkout whose .claude/ git does
- * not ignore (the first version never wrote there). Null when done.
- */
-async function cleanupCheckout(checkout: string, signal: AbortSignal): Promise<string | null> {
-  if (headroom.cleaned.has(checkout)) return null;
-  let ignored = headroom.ignored.get(checkout);
-  if (ignored === undefined) {
-    if (!existsSync(checkout)) return "the checkout is gone";
-    ignored = await gitYesNo(["check-ignore", "-q", ".claude/settings.local.json"], checkout, signal);
-    headroom.ignored.set(checkout, ignored);
-  }
-  if (!ignored) {
-    headroom.cleaned.add(checkout);
-    return null;
-  }
-  const file = join(checkout, ".claude", "settings.local.json");
-  const text = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  const change = cleanupSettingsText(text);
-  if (change.action === "skip") return `settings.local.json ${change.reason}; left alone`;
-  if (change.action === "write") await writeAtomically(file, change.text);
-  if (change.action === "delete") await rm(file, { force: true });
-  headroom.cleaned.add(checkout);
-  return null;
-}
-
-function headroomOutputView(state: HeadroomState, stats: ReturnType<typeof parseStats>) {
-  return headroomView({ state, up: headroom.up, relayUp: headroom.relayUp, relayNote: headroom.relayNote, stats, now: Date.now(), paths: headroom.paths });
-}
-
-async function headroomBeat(input: HeadroomBeatInput, signal: AbortSignal): Promise<HeadroomBeatOutput> {
-  const route = () => ({ enabled: OFF_FOR_GOOD === null && !(headroom.state?.stopped ?? true), relayHealthy: headroom.relayUp });
-  if (headroom.beating) return { view: headroomOutputView(await headroomState(), null), skipped: [], route: route() };
-  headroom.beating = true;
-  try {
-    const skipped: HeadroomBeatOutput["skipped"] = [];
-    for (const checkout of new Set(input.checkouts)) {
-      try {
-        const problem = await cleanupCheckout(checkout, signal);
-        if (problem !== null) skipped.push({ path: clip(checkout, 1000), reason: clip(problem, 300) });
-      } catch (error) {
-        skipped.push({ path: clip(checkout, 1000), reason: clip(error instanceof Error ? error.message : String(error), 300) });
-      }
-    }
-
-    // Headroom first: when stopped it goes before the relay is considered.
-    const state = await headroomState();
-    const reply = await headroomGet("/health", signal);
-    const health = parseHealth(reply?.status ?? null, reply?.body ?? null);
-    const pid = await headroomPid(health, signal);
-    const rssBytes = pid === null ? null : ((await processFacts(pid, signal))?.rssBytes ?? null);
-    const decision = headroomStep(state, {
-      now: Date.now(),
-      installed: await headroomInstalled(),
-      installing: headroom.installing,
-      pid,
-      health,
-      rssBytes,
-    });
-    headroom.up = decision.up;
-    if (decision.state.stopped && pid !== null) await stopHeadroomProxy(pid, signal);
-    if (decision.action === "install") installHeadroom();
-    if (decision.action === "restart" && pid !== null) await stopHeadroomProxy(pid, signal);
-    if (decision.action === "start" || decision.action === "restart") {
-      await startHeadroomProxy().catch((error: unknown) => console.warn(`headroom: start failed: ${error instanceof Error ? error.message : String(error)}`));
-    }
-    await saveHeadroomState(decision.state);
-
-    // Then the relay: started at once when dead, stopped only once nothing uses it.
-    const reading = await relayReading(signal, PROBE_TIMEOUT_MS);
-    const rpid = await relayPid(reading, signal);
-    const step = relayStep({
-      stopped: decision.state.stopped,
-      pid: rpid,
-      reading,
-      activeAgentTurns: input.activeAgentTurns,
-      canStart: canStartRelay(input.pluginRoot),
-      unhealthyBeats: headroom.relayUnhealthyBeats,
-    });
-    headroom.relayUnhealthyBeats = step.unhealthyBeats;
-    headroom.relayNote = step.reason;
-    headroom.relayUp = reading.healthy && step.action === "none";
-    if ((step.action === "stop" || step.action === "restart") && rpid !== null) await stopRelay(rpid, signal);
-    if (step.action === "start" || step.action === "restart") {
-      await startRelayProcess(input.pluginRoot).catch((error: unknown) => {
-        headroom.relayNote = `the relay did not start: ${clip(error instanceof Error ? error.message : String(error), 200)}`;
-      });
-    }
-
-    const statsReply = headroom.up ? await headroomGet("/stats", signal) : null;
-    const stats = statsReply !== null && statsReply.status === 200 ? parseStats(statsReply.body) : null;
-    return { view: headroomOutputView(decision.state, stats), skipped: skipped.slice(0, 50), route: route() };
-  } finally {
-    headroom.beating = false;
-  }
-}
-
-/**
- * Whether a thread starting now goes through the relay: Headroom not
- * stopped, and the relay answering its health check (RELAY_PROBE_TIMEOUT_MS),
- * read fresh. server.ts asks this from its contributeEnv resolver.
- */
-async function headroomRoute(signal: AbortSignal): Promise<{ enabled: boolean; relayHealthy: boolean }> {
-  const state = await headroomState();
-  if (state.stopped || OFF_FOR_GOOD !== null) return { enabled: false, relayHealthy: false };
-  const reading = await relayReading(signal, RELAY_PROBE_TIMEOUT_MS);
-  return { enabled: true, relayHealthy: reading.healthy };
-}
-
-/**
- * The owner's explicit stop, in order (headroom.ts stopPlan): stopped saved
- * first, so no new thread is routed; then Headroom (the relay goes direct
- * without it); the relay last, only once no agent turn is active and nothing
- * is in flight, else a later beat stops it. Start reverses it: the relay
- * now, Headroom on the next beat.
- */
-async function headroomControl(
-  { action, pluginRoot, activeAgentTurns }: { action: "stop" | "start"; pluginRoot: string | null; activeAgentTurns: number },
-  signal: AbortSignal,
-): Promise<{ relayWaits: string | null }> {
-  const refusal = controlRefusal(action);
-  if (refusal !== null) throw new Error(refusal);
-  const state = await headroomState();
-  if (action === "start") {
-    await saveHeadroomState({ ...state, stopped: false, starts: [] });
-    const reading = await relayReading(signal, PROBE_TIMEOUT_MS);
-    if (!reading.healthy && (await relayPid(reading, signal)) === null && canStartRelay(pluginRoot)) await startRelayProcess(pluginRoot);
-    headroom.relayNote = null;
-    return { relayWaits: null };
-  }
-  await saveHeadroomState({ ...state, stopped: true });
-  headroom.up = false;
-  const reply = await headroomGet("/health", signal);
-  const pid = await headroomPid(parseHealth(reply?.status ?? null, reply?.body ?? null), signal);
-  const reading = await relayReading(signal, PROBE_TIMEOUT_MS);
-  const rpid = await relayPid(reading, signal);
-  const plan = stopPlan({ headroomPid: pid, relayAlive: reading.healthy || rpid !== null, activeAgentTurns, reading });
-  if (plan.stopHeadroom && pid !== null) await stopHeadroomProxy(pid, signal);
-  if (plan.stopRelay && rpid !== null) await stopRelay(rpid, signal);
-  headroom.relayUp = !plan.stopRelay && reading.healthy;
-  headroom.relayNote = plan.relayWaits;
-  return { relayWaits: plan.relayWaits };
 }
 
 function run(
@@ -2135,11 +1823,7 @@ export default experimental_defineHostEntry({
 
     memoryStatus: async (_input, { signal }) => readMemory(signal),
 
-    headroomBeat: async (input, { signal }) => headroomBeat(input, signal),
-
-    headroomRoute: async (_input, { signal }) => headroomRoute(signal),
-
-    headroomControl: async (input, { signal }) => ({ ok: true as const, ...(await headroomControl(input, signal)) }),
+    retireLegacyRoute: async (input, { signal }) => retireLegacyRoute(input, signal),
 
     localConfig: async (_input, { experimental_paths }) => {
       const text = await readLocalConfigText(homedir());

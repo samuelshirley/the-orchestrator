@@ -13,7 +13,7 @@ import {
   repoOf,
   type GuardContext,
 } from "./builderguard";
-import { LEGACY_SETTINGS_URL, withoutLegacyRoute } from "./headroom";
+import { LEGACY_SETTINGS_URL, withoutLegacyRoute } from "./legacyroute";
 
 const REPO = "/Users/me/Github/app";
 const WT = `${REPO}/.claude/worktrees/x`;
@@ -335,7 +335,7 @@ describe("builderSettings", () => {
     expect(builderSettings(["junk"], options)).toEqual(builderSettings({}, options));
   });
 
-  it("never routes through Headroom, and a reused worktree loses the first version's key (host writeBuilderGuard)", () => {
+  it("never sets a base URL, and a reused worktree loses the removed proxy's key (host writeBuilderGuard)", () => {
     const guarded = builderSettings({}, options);
     expect(JSON.stringify(guarded)).not.toContain("ANTHROPIC_BASE_URL");
     // A worktree the first version routed: the key goes, the guard is the same.

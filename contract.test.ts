@@ -277,47 +277,19 @@ describe("Jev model routing", () => {
   });
 });
 
-describe("headroomBeat", () => {
-  const { input, output } = hostContract.headroomBeat;
-  const view = { state: "on", line: "Headroom: on · 1.2M tokens removed (8.6%)", needsOwner: null };
-  const route = { enabled: true, relayHealthy: true };
-  const beat = { checkouts: ["/Users/me/Github/app", "/Users/me/Github/app/.claude/worktrees/x"], pluginRoot: "/Users/me/Github/the-orchestrator", activeAgentTurns: 2 };
-  it("takes the checkouts to clean up, the plugin's source and the agent turns running", () => {
-    expect(input.safeParse(beat).success).toBe(true);
-    expect(input.safeParse({ ...beat, pluginRoot: null, activeAgentTurns: 0 }).success).toBe(true);
-    expect(input.safeParse({ ...beat, checkouts: [""] }).success).toBe(false);
-    expect(input.safeParse({ ...beat, activeAgentTurns: -1 }).success).toBe(false);
-    expect(input.safeParse({ checkouts: [] }).success).toBe(false);
-    expect(input.safeParse({ ...beat, url: "http://0.0.0.0:1" }).success).toBe(false);
+describe("retireLegacyRoute", () => {
+  const { input, output } = hostContract.retireLegacyRoute;
+  it("takes only the agent turns running", () => {
+    expect(input.safeParse({ activeAgentTurns: 0 }).success).toBe(true);
+    expect(input.safeParse({ activeAgentTurns: -1 }).success).toBe(false);
+    expect(input.safeParse({}).success).toBe(false);
+    expect(input.safeParse({ activeAgentTurns: 0, dir: "/" }).success).toBe(false);
   });
-  it("returns the board's view, the checkouts left alone and the route, nothing raw", () => {
-    expect(output.safeParse({ view, skipped: [], route }).success).toBe(true);
-    expect(output.safeParse({ view: { ...view, state: "down", needsOwner: { title: "Headroom is down", body: "b", command: "tail -n 100 /x/proxy.log" } }, skipped: [{ path: "/a", reason: "settings.local.json does not parse as JSON; left alone" }], route }).success).toBe(true);
-    expect(output.safeParse({ view, skipped: [] }).success).toBe(false);
-    expect(output.safeParse({ view, skipped: [], route, log: "raw install output" }).success).toBe(false);
-    expect(output.safeParse({ view: { ...view, state: "maybe" }, skipped: [], route }).success).toBe(false);
-  });
-});
-
-describe("headroomRoute", () => {
-  it("takes nothing and says only whether to route", () => {
-    const { input, output } = hostContract.headroomRoute;
-    expect(input.safeParse({}).success).toBe(true);
-    expect(input.safeParse({ threadId: "thr_x" }).success).toBe(false);
-    expect(output.safeParse({ enabled: true, relayHealthy: false }).success).toBe(true);
-    expect(output.safeParse({ enabled: true, relayHealthy: false, url: "http://127.0.0.1:8791" }).success).toBe(false);
-  });
-});
-
-describe("headroomControl", () => {
-  it("is stop or start, with the plugin's source and the agent turns running", () => {
-    const { input, output } = hostContract.headroomControl;
-    const base = { pluginRoot: null, activeAgentTurns: 0 };
-    expect(input.safeParse({ action: "stop", ...base }).success).toBe(true);
-    expect(input.safeParse({ action: "start", ...base, pluginRoot: "/Users/me/Github/the-orchestrator" }).success).toBe(true);
-    expect(input.safeParse({ action: "install", ...base }).success).toBe(false);
-    expect(input.safeParse({ action: "stop" }).success).toBe(false);
-    expect(output.safeParse({ ok: true, relayWaits: "waiting for 1 agent turn to finish" }).success).toBe(true);
-    expect(output.safeParse({ ok: true, relayWaits: null }).success).toBe(true);
+  it("says what it stopped and removed, and whether it is done", () => {
+    expect(output.safeParse({ done: true, waits: null, stopped: [], removed: "/Users/me/.local/share/x" }).success).toBe(true);
+    expect(output.safeParse({ done: false, waits: "the relay waits for 1 agent turn to finish", stopped: [{ what: "proxy", pid: 4242 }], removed: null }).success).toBe(true);
+    expect(output.safeParse({ done: false, waits: null, stopped: [{ what: "claude", pid: 4242 }], removed: null }).success).toBe(false);
+    expect(output.safeParse({ done: false, waits: null, stopped: [{ what: "relay", pid: 1 }], removed: null }).success).toBe(false);
+    expect(output.safeParse({ done: true, waits: null, stopped: [] }).success).toBe(false);
   });
 });
