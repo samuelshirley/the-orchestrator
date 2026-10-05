@@ -79,6 +79,13 @@ describe("doneClose", () => {
     expect(doneBlocker(args())).toBeNull();
   });
 
+  it("never closes a research task on its Done while its report waits on the owner", () => {
+    // The report ticket is an open ticket: done.ts holds it like questions.
+    expect(doneBlocker(args({ openTickets: 1, report: "Done: report submitted, waiting on Alex to review" }))).toBe(
+      "a question, review or report is open",
+    );
+  });
+
   it("keeps a task for every open thing, and says why", () => {
     const kept: [DoneArgs, string][] = [
       [args({}, { closedAt: NOW }), "already closed"],
@@ -87,7 +94,7 @@ describe("doneClose", () => {
       [args({}, { buildState: "running" }), "a build is in flight"],
       [args({}, { buildState: "preparing" }), "a build is in flight"],
       [args({}, { buildState: "failed" }), "a failed build is still the task's"],
-      [args({ openTickets: 1 }), "a question or review is open"],
+      [args({ openTickets: 1 }), "a question, review or report is open"],
       [args({ running: true }), "an agent of the task is working"],
       [args({}, { prNumber: 62 }), "has a PR"],
       [args({}, { branch: "task/x" }), "has a branch"],

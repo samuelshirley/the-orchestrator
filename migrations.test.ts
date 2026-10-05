@@ -23,6 +23,9 @@ const PINNED = [
   "02089522acb15463c183179e0c622b51c8110ca2a18c01165cd04cf64ba31676", // 14 jev_watch
   "0a3a9a2b73905e40ba8384d370280886f25cd18d033df563925ce963b8da9e85", // 15 jev_watch index
   "c4d89e7f19acac46b600537e2998ff8254db6fd29384473e445dd0f94e190589", // 16 model_routes
+  "6905bfd63bead09255a64c0b45053f152a1b6dcd41317b9d154299d6cd1ec560", // 17 tickets.report_path
+  "c2d49836e887154b5a6c595479a76421d75591f4c159d416cb9447f637848516", // 18 tickets.report_title
+  "6d1a718b8e5e6609ef966d44b299ee0130dbce2c85882bc104d98ef305c909ac", // 19 tickets.report_summary
 ];
 
 const sha256 = (statement: string) => createHash("sha256").update(statement).digest("hex");
@@ -38,4 +41,20 @@ describe("MIGRATIONS", () => {
       expect(sha256(MIGRATIONS[index])).toBe(hash);
     },
   );
+});
+
+describe("the report columns (17-19)", () => {
+  it("migrate a dossier made before them, keeping its tickets", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { Store } = await import("./store");
+    const db = new DatabaseSync(":memory:");
+    // A dossier as it stood before the report columns: migrations 0-16 only.
+    for (const statement of MIGRATIONS.slice(0, 17)) db.exec(statement);
+    db.prepare("INSERT INTO tickets (id, task_id, kind, questions, status, created_at) VALUES ('tkt_old', 'task_a', 'questions', '[\"Q?\"]', 'open', 1)").run();
+    for (const statement of MIGRATIONS.slice(17)) db.exec(statement);
+    const store = new Store(db as never);
+    expect(store.ticket("tkt_old")).toMatchObject({ kind: "questions", questions: ["Q?"], report: null });
+    const { ticket } = store.submitReport("task_a", { path: "/r/task_a/report.md", title: "Findings", summary: null });
+    expect(store.ticket(ticket.id)?.report).toEqual({ path: "/r/task_a/report.md", title: "Findings", summary: null });
+  });
 });

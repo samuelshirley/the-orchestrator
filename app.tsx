@@ -13,6 +13,7 @@ import type { CSSProperties, ReactNode } from "react";
 import {
   definePluginApp,
   experimental_NewThreadComposer as NewThreadComposer,
+  Markdown,
   experimental_useSidebarThreads,
   ThreadChat,
   ThreadTitle,
@@ -1345,6 +1346,155 @@ function BuildFailedActions({ taskId, rpc, reload }: { taskId: string; rpc: Rpc;
   );
 }
 
+/**
+ * A task's report (report.ts), read through the host (report_read: the same
+ * path rules and 2 MB cap as submit_report) and shown with bb's own chat
+ * Markdown renderer. Its path, and Open in editor through bb's own file opener.
+ */
+function ReportDialog({ ticketId, rpc, onClose }: { ticketId: string | null; rpc: Rpc; onClose: () => void }) {
+  const navigate = useBbNavigate();
+  const [result, setResult] = useState<{
+    ticketId: string;
+    report: { title: string; path: string; text: string; hostId: string } | null;
+    error: string | null;
+  } | null>(null);
+  useEffect(() => {
+    if (ticketId === null) return;
+    let cancelled = false;
+    rpc.call("report_read", { ticketId }).then(
+      (report) => {
+        if (!cancelled) setResult({ ticketId, report, error: null });
+      },
+      (cause: unknown) => {
+        if (!cancelled) setResult({ ticketId, report: null, error: message(cause) });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [ticketId, rpc]);
+  const current = result !== null && result.ticketId === ticketId ? result : null;
+  const report = current?.report ?? null;
+  return (
+    <Dialog
+      open={ticketId !== null}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
+      <DialogContent className="orc-report sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{report?.title ?? "Report"}</DialogTitle>
+          <DialogDescription className="flex flex-wrap items-center gap-2">
+            {report !== null ? (
+              <>
+                <span className="min-w-0 break-all font-mono text-xs">{report.path}</span>
+                <button
+                  type="button"
+                  className="text-xs hover:underline"
+                  onClick={() =>
+                    navigate.experimental_openFileExternally({ target: { kind: "host", hostId: report.hostId, path: report.path }, location: null })
+                  }
+                >
+                  Open in editor
+                </button>
+              </>
+            ) : current?.error ? null : (
+              "Loading…"
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        {current?.error ? <ErrorLine>The report could not be read: {current.error}</ErrorLine> : null}
+        {report !== null ? (
+          <div className="orc-report-body">
+            <Markdown content={report.text} />
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** A report waiting on the owner: Read report, Mark reviewed (closes the task), Follow up (a note to the task; the ticket stays open). */
+function ReportActions({
+  report,
+  rpc,
+  reload,
+}: {
+  report: NonNullable<NeedsYouItem["report"]>;
+  rpc: Rpc;
+  reload: () => void;
+}) {
+  const [reading, setReading] = useState(false);
+  const [following, setFollowing] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  const act = (work: Promise<unknown>, after: () => void) => {
+    setBusy(true);
+    work
+      .then(
+        () => {
+          setError(null);
+          after();
+          reload();
+        },
+        (cause: unknown) => setError(message(cause)),
+      )
+      .finally(() => setBusy(false));
+  };
+  return (
+    <div className="flex flex-col gap-2" onClick={(event) => event.stopPropagation()}>
+      {report.summary !== null ? <p className="whitespace-pre-wrap text-sm text-foreground">{report.summary}</p> : null}
+      <p className="break-all font-mono text-xs text-muted-foreground">{report.path}</p>
+      <div className="flex flex-wrap gap-1.5">
+        <Button size="sm" variant="outline" onClick={() => setReading(true)}>
+          Read report
+        </Button>
+        <Button size="sm" disabled={busy} onClick={() => act(rpc.call("report_reviewed", { ticketId: report.ticketId }), () => undefined)}>
+          Mark reviewed
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setFollowing(!following)}>
+          Follow up
+        </Button>
+      </div>
+      {following ? (
+        <div className="flex flex-col gap-1.5">
+          <textarea
+            className="min-h-20 w-full rounded-md border border-border bg-background px-2 py-1 text-sm"
+            placeholder="What should the task look into or change? It goes to the task as your message."
+            value={note}
+            maxLength={4000}
+            onChange={(event) => {
+              setNote(event.target.value);
+              setSent(false);
+            }}
+          />
+          <div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || note.trim() === ""}
+              onClick={() =>
+                act(rpc.call("report_follow_up", { ticketId: report.ticketId, note }), () => {
+                  setNote("");
+                  setSent(true);
+                })
+              }
+            >
+              Send to the task
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {sent ? <p className="text-xs text-muted-foreground">Sent. The report stays here until you mark it reviewed.</p> : null}
+      {error !== null ? <ErrorLine>{error}</ErrorLine> : null}
+      <ReportDialog ticketId={reading ? report.ticketId : null} rpc={rpc} onClose={() => setReading(false)} />
+    </div>
+  );
+}
+
 /** The Sign in with Claude button's one action: the host starts `claude auth login`, which opens the browser's sign-in tab. */
 function useClaudeSignIn(rpc: Rpc) {
   const [busy, setBusy] = useState(false);
@@ -1773,7 +1923,7 @@ function NeedsYouSection({
                     </UrlLink>
                   ) : null}
                   <Button variant="ghost" size="sm" onClick={() => setOpen(expanded ? null : item.key)}>
-                    {expanded ? "Hide" : questions !== undefined ? "Answer" : item.buildFailed || item.agentTrouble !== null ? "Fix" : "Open"}
+                    {expanded ? "Hide" : questions !== undefined ? "Answer" : item.buildFailed || item.agentTrouble !== null ? "Fix" : item.report !== null ? "Review" : "Open"}
                   </Button>
                 </div>
                 {expanded ? (
@@ -1809,6 +1959,7 @@ function NeedsYouSection({
                         </div>
                       </div>
                     ) : null}
+                    {item.report !== null ? <ReportActions report={item.report} rpc={rpc} reload={reload} /> : null}
                     {item.buildFailed && task !== undefined ? (
                       <div className="flex flex-col gap-2">
                         <p className="text-sm text-foreground">
@@ -2012,6 +2163,11 @@ const TaskRowView = memo(function TaskRowView({
           <span className="orc-you orc-you-ready">
             <Icon name="CircleCheck" className="size-3.5" />
             Test &amp; merge
+          </span>
+        ) : row.you.report ? (
+          <span className="orc-you orc-you-ready">
+            <Icon name="CircleCheck" className="size-3.5" />
+            Review report
           </span>
         ) : (
           <span className="text-xs text-muted-foreground">–</span>
@@ -2438,6 +2594,7 @@ function ClosedTaskSection({
   now,
   onBack,
   onOpenThread,
+  rpc,
 }: {
   /** Null while loading, or when the task is unknown (then `error` says so). */
   view: ClosedTaskView | null;
@@ -2448,7 +2605,9 @@ function ClosedTaskSection({
   now: number;
   onBack: () => void;
   onOpenThread: (threadId: string) => void;
+  rpc: Rpc;
 }) {
+  const [reading, setReading] = useState<string | null>(null);
   const back = (
     <div className="border-b border-border px-3 py-2">
       <button
@@ -2498,8 +2657,14 @@ function ClosedTaskSection({
             {view.closedAt !== null ? (
               <span title={new Date(view.closedAt).toLocaleString()}>closed {relativeTime(view.closedAt, now)}</span>
             ) : null}
+            {view.report !== null ? (
+              <button type="button" className="hover:underline" title={view.report.title} onClick={() => setReading(view.report?.ticketId ?? null)}>
+                Report
+              </button>
+            ) : null}
           </p>
         </div>
+        <ReportDialog ticketId={reading} rpc={rpc} onClose={() => setReading(null)} />
         {view.brief !== "" ? (
           <SummaryBlock title="Brief">
             <p className="whitespace-pre-wrap">{view.brief}</p>
@@ -3180,6 +3345,7 @@ function BoardPage({ subPath }: PluginNavPanelProps) {
               now={now}
               onBack={() => (boardProjectId !== null ? focusProject(boardProjectId) : select(null))}
               onOpenThread={(threadId) => openClosed(scope.taskId, threadId)}
+              rpc={rpc}
             />
           ) : (
             <>

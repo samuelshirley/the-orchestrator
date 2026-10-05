@@ -6,6 +6,7 @@ import { Store, type SqlDb, type Ticket } from "./store";
 import {
   closeHold,
   heldCloseMessage,
+  holdWhat,
   releaseCloseRefusal,
   withdrawDecision,
   withdrawnByPatchesMessage,
@@ -33,6 +34,13 @@ const ticket = (overrides: Partial<Ticket> = {}): Ticket => ({
 });
 
 const review = ticket({ id: "tkt_review", kind: "review", questions: [], asks: [] });
+const report = ticket({
+  id: "tkt_report",
+  kind: "report",
+  questions: [],
+  asks: [],
+  report: { path: "/Users/a/.bb/thread-storage/task_uf5p8wat0b/report.md", title: "Jev check", summary: null },
+});
 const own = { kind: "task" as const, taskId: "task_uf5p8wat0b" };
 const patches = { kind: "orchestrator" as const, projectId: "proj_orc" };
 const ticketTask = { id: "task_uf5p8wat0b", projectId: "proj_orc" };
@@ -40,7 +48,7 @@ const reason = "Answered by Patches' decision on task_4yqs06t885.";
 
 describe("closeHold", () => {
   it("holds a close on an open questions ticket", () => {
-    expect(closeHold([ticket({ questions: ["a", "b"] })])).toEqual({ ticketId: "tkt_zyvdrk0sab", questions: 2 });
+    expect(closeHold([ticket({ questions: ["a", "b"] })])).toEqual({ ticketId: "tkt_zyvdrk0sab", kind: "questions", questions: 2 });
   });
 
   it("does not hold on a review ticket or on nothing", () => {
@@ -53,10 +61,45 @@ describe("closeHold", () => {
   });
 
   it("says why the task stays open and how it closes", () => {
-    const message = heldCloseMessage("task_uf5p8wat0b", { ticketId: "tkt_zyvdrk0sab", questions: 2 }, "Reloaded: abc1234 is live.");
+    const message = heldCloseMessage("task_uf5p8wat0b", { ticketId: "tkt_zyvdrk0sab", kind: "questions", questions: 2 }, "Reloaded: abc1234 is live.");
     expect(message).toBe(
       "Reloaded: abc1234 is live. task_uf5p8wat0b stays open: its ticket tkt_zyvdrk0sab has 2 open questions to Alex. Its claims are released. It closes on its own once they are answered or withdrawn (ask_sam withdraw, with a reason).",
     );
+  });
+});
+
+describe("closeHold with a report waiting on the owner", () => {
+  it("holds a close on an open report ticket, exactly like questions", () => {
+    expect(closeHold([report])).toEqual({ ticketId: "tkt_report", kind: "report", questions: 0 });
+    expect(closeHold([review, report])?.ticketId).toBe("tkt_report");
+  });
+
+  it("names the questions first when both are open", () => {
+    expect(closeHold([report, ticket()])).toMatchObject({ ticketId: "tkt_zyvdrk0sab", kind: "questions" });
+  });
+
+  it("says the report waits on the owner's review, and how the task closes", () => {
+    const hold = closeHold([report])!;
+    expect(holdWhat(hold)).toBe("has a report waiting on Alex to review");
+    expect(heldCloseMessage("task_uf5p8wat0b", hold, "Landed.")).toBe(
+      "Landed. task_uf5p8wat0b stays open: its ticket tkt_report has a report waiting on Alex to review. Its claims are released. It closes on its own once Alex marks the report reviewed, or the ticket is withdrawn (ask_sam withdraw, with a reason).",
+    );
+  });
+
+  it("refuses release_task close while the report is open", () => {
+    expect(releaseCloseRefusal([report])).toBe(
+      "tkt_report has a report waiting on Alex to review: withdraw tkt_report with a reason first (ask_sam withdraw), or let Alex mark the report reviewed.",
+    );
+    expect(releaseCloseRefusal([{ ...report, status: "closed" }].filter((t) => t.status === "open"))).toBeNull();
+  });
+
+  it("lets the task or Patches withdraw a report, whole and with a reason", () => {
+    const base = { ticket: report, ticketTask, reason };
+    expect(withdrawDecision({ ...base, caller: own })).toEqual({ kind: "ticket" });
+    expect(withdrawDecision({ ...base, caller: patches })).toEqual({ kind: "ticket" });
+    expect(withdrawDecision({ ...base, caller: { kind: "task", taskId: "task_4yqs06t885" } })).toMatch(/belongs to task_uf5p8wat0b/);
+    expect(withdrawDecision({ ...base, caller: own, reason: "too short" })).toMatch(/at least 10 characters/);
+    expect(withdrawDecision({ ...base, caller: own, questions: [1] })).toBe("tkt_report is a report: withdraw it whole, without questions.");
   });
 });
 
@@ -219,5 +262,38 @@ describe("an automatic close with an open questions ticket (the uf5p case)", () 
     reloadLive(store, taskId);
     reloadLive(store, taskId);
     expect(store.releases(taskId)).toHaveLength(1);
+  });
+});
+
+// task "Critical validation of jev and headroom", 2026-10-04: its findings were
+// relayed in chat only; it was closed and archived with nothing to review.
+describe("a research task with its report open", () => {
+  function reportTask() {
+    const db = new DatabaseSync(":memory:");
+    Store.migrateInPlace(db as unknown as SqlDb);
+    let clock = 1000;
+    const store = new Store(db as unknown as SqlDb, () => (clock += 1));
+    const task = store.createTask({ projectId: "proj_orc", title: "Validate Jev", brief: "b" });
+    store.updateTask(task.id, { stage: "build", buildState: "none", verifiedSha: "abc1234def" });
+    const { ticket: opened } = store.submitReport(task.id, { path: `/r/${task.id}/report.md`, title: "Jev check", summary: "Two findings." });
+    return { store, taskId: task.id, ticketId: opened.id };
+  }
+
+  it("holds landed.ts's close until the owner marks it reviewed", () => {
+    const { store, taskId, ticketId } = reportTask();
+    const check = () =>
+      landedClose({
+        task: store.task(taskId)!,
+        ownShas: ["abc1234def"],
+        commits: [{ sha: "abc1234def0", committedAt: 2000, message: `x\n\n${taskTrailer(taskId)}` }],
+        base: "main",
+        openTickets: store.tickets({ status: "open" }).filter((open) => open.taskId === taskId).length,
+        running: false,
+        reloadPending: false,
+      });
+    expect(closeHold(store.tickets({ status: "open" }))).toMatchObject({ ticketId, kind: "report" });
+    expect(check()).toBeNull();
+    store.closeTicket(ticketId, null);
+    expect(check()).not.toBeNull();
   });
 });

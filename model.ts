@@ -10,6 +10,7 @@ import type { AgentLiveness, TaskLiveness, Trouble } from "./liveness";
 import { reviewStale } from "./review";
 import { stepsLabel } from "./steps";
 import type { Child, Stage, Task, Ticket } from "./store";
+import { reportItemTitle, reportStatusLabel } from "./report";
 import { prTone, type PrTone } from "./validation";
 
 /** The owner's cap on build agents working at once. */
@@ -98,7 +99,7 @@ export interface TaskRow {
   research: Cell;
   build: Cell;
   pr: { pr: PullRequest | null; tone: PrTone | null; branch: string | null };
-  you: { questions: number; review: boolean; asking: boolean };
+  you: { questions: number; review: boolean; asking: boolean; report: boolean };
   working: boolean;
 }
 
@@ -154,6 +155,7 @@ export function taskRow({
   const questions = open
     .filter((ticket) => ticket.kind === "questions")
     .reduce((sum, ticket) => sum + ticket.questions.length, 0);
+  const report = open.some((ticket) => ticket.kind === "report");
   const asking = [thread, ...mine.map((child) => threads.get(child.threadId))].some(isAsking);
   const taskAgent = liveness?.agents.find((agent) => agent.role === "task" && agent.threadId === task.threadId);
 
@@ -165,7 +167,7 @@ export function taskRow({
     research = { state: "working", label: "Planning", threadId: task.threadId };
   } else if (task.stage === "research") {
     research = {
-      ...notPlanning({ task, questions, asking, taskAgent, followUp, stepsLeft, unheard: liveness?.unheard ?? null }),
+      ...notPlanning({ task, questions, asking, report, taskAgent, followUp, stepsLeft, unheard: liveness?.unheard ?? null }),
       threadId: task.threadId,
     };
   } else {
@@ -211,6 +213,7 @@ export function taskRow({
       // A review ticket counts only while the PR is still what was proven.
       review: open.some((ticket) => ticket.kind === "review") && reviewStale({ task, pr, aiTestsLabel }) === null,
       asking,
+      report,
     },
     working:
       isWorking(thread) ||
@@ -221,7 +224,7 @@ export function taskRow({
 
 /**
  * A research-stage task whose thread is not running is not planning: it waits
- * on the owner, landed a step and has more left (steps.ts: idle, kept open), says
+ * on the owner (questions, or a report to review: report.ts), landed a step and has more left (steps.ts: idle, kept open), says
  * it landed (landed.ts closes it once git agrees and nothing is open), waits
  * to start, is stuck (liveness marks why), is stalled because
  * no Patches chat hears it go idle (`unheard`), or is idle until Patches,
@@ -231,6 +234,7 @@ export function notPlanning({
   task,
   questions,
   asking,
+  report = false,
   taskAgent,
   followUp = null,
   stepsLeft = 0,
@@ -239,6 +243,8 @@ export function notPlanning({
   task: Pick<Task, "note">;
   questions: number;
   asking: boolean;
+  /** An open report ticket: the owner reviews it, then the task closes. */
+  report?: boolean;
   taskAgent: AgentLiveness | undefined;
   /** The done report names work left: kept open for Patches, not planning. */
   followUp?: string | null;
@@ -248,6 +254,7 @@ export function notPlanning({
   unheard?: string | null;
 }): Pick<Cell, "state" | "label"> {
   if (questions > 0 || asking) return { state: "blocked", label: `Waiting on ${owner()}` };
+  if (report) return { state: "blocked", label: reportStatusLabel() };
   if (stepsLeft > 0) return { state: "pending", label: stepsLabel(stepsLeft) };
   if (followUp !== null) return { state: "done", label: "Done, with a follow-up" };
   const landed = reportedLandedShas(task.note)[0];
@@ -281,6 +288,8 @@ export interface NeedsYouItem {
   tone: "attention" | "danger" | "success";
   questionTicketId: string | null;
   reviewTicketId: string | null;
+  /** The task's open report (report.ts): Read report, Mark reviewed, Follow up. */
+  report: { ticketId: string; title: string; summary: string | null; path: string } | null;
   /** A thread in the task has a native question or approval open. */
   asking: boolean;
   /** The task's build failed past BUILD_FAILURE_LIMIT: Retry or Dismiss. */
@@ -333,6 +342,11 @@ export function needsYou({
     const questionTicket = open.find((ticket) => ticket.kind === "questions") ?? null;
     // Never a merge ask for an unproven head: a stale review ticket is not shown.
     const reviewTicket = open.find((ticket) => ticket.kind === "review" && staleReview(task) === null) ?? null;
+    const reportTicket = open.find((ticket) => ticket.kind === "report" && ticket.report) ?? null;
+    const report =
+      reportTicket?.report == null
+        ? null
+        : { ticketId: reportTicket.id, title: reportTicket.report.title, summary: reportTicket.report.summary, path: reportTicket.report.path };
     const taskThreads = [task.threadId, ...children.filter((c) => c.taskId === task.id).map((c) => c.threadId)]
       .filter((id): id is string => id !== null);
     const askingThread = taskThreads.find((id) => isAsking(byId.get(id))) ?? null;
@@ -362,17 +376,24 @@ export function needsYou({
       parts.push(task.prNumber !== null ? `PR #${task.prNumber} ready: test and merge` : "ready for you");
       tone ??= "success";
     }
+    if (report !== null) {
+      parts.push("report ready");
+      tone ??= "success";
+    }
     if (tone === null) continue;
+    // A report alone is titled by it: "Review report: <title>".
+    const alone = report !== null && parts.length === 1;
     items.push({
       key: `task:${task.id}`,
       taskId: task.id,
       threadId: askingThread ?? task.threadId,
-      title: task.title,
+      title: alone ? reportItemTitle(report.title) : task.title,
       projectId: task.projectId,
-      summary: `${task.title} · ${parts.join(" · ")}`,
+      summary: alone ? reportItemTitle(report.title) : `${task.title} · ${parts.join(" · ")}`,
       tone,
       questionTicketId: questionTicket?.id ?? null,
       reviewTicketId: reviewTicket?.id ?? null,
+      report,
       asking: askingThread !== null,
       buildFailed,
       agentTrouble,
@@ -392,6 +413,7 @@ export function needsYou({
       tone: "attention",
       questionTicketId: null,
       reviewTicketId: null,
+      report: null,
       asking: true,
       buildFailed: false,
       agentTrouble: null,

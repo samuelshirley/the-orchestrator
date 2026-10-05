@@ -110,6 +110,11 @@ describe("openWork", () => {
     expect(openWork({ ...idle, running: true })).toMatch(/working/);
   });
 
+  it("counts a report waiting on the owner's review as open work", () => {
+    // server.ts passes every open ticket of the task, report tickets included.
+    expect(openWork({ ...idle, openTickets: 1 })).toBe("a question, review or report is open");
+  });
+
   it("counts steps left as open work, after everything more urgent", () => {
     expect(openWork({ ...idle, stepsLeft: 2 })).toBe("steps left: 2");
     expect(openWork({ ...idle, stepsLeft: 1 })).toBe(`${STEPS_LEFT_PREFIX}1`);

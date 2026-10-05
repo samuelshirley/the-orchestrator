@@ -97,12 +97,14 @@ export interface ClosedTaskSummary {
   releases: Release[];
   /** The task thread first, then its research and build threads, oldest first. */
   threads: ClosedThread[];
+  /** Its newest report (report.ts), still readable after archiving: the Report link. Null when it had none. */
+  report: { ticketId: string; title: string; path: string } | null;
 }
 
 /**
  * A closed task's dossier as one plain view. Tickets, withdrawals and children
- * of other tasks are ignored; review tickets are not questions. Releases carry
- * no task id: the caller hands this task's own.
+ * of other tasks are ignored; review and report tickets are not questions.
+ * Releases carry no task id: the caller hands this task's own.
  */
 export function closedTaskSummary({
   task,
@@ -161,7 +163,17 @@ export function closedTaskSummary({
       at: entry.at,
     })),
     threads,
+    report: latestReport(tickets, task.id),
   };
+}
+
+/** The task's newest report ticket, open or closed, as the Report link. */
+function latestReport(tickets: readonly Ticket[], taskId: string): ClosedTaskSummary["report"] {
+  const newest = tickets
+    .filter((ticket) => ticket.taskId === taskId && ticket.kind === "report" && ticket.report)
+    .reduce<Ticket | null>((best, ticket) => (best === null || ticket.createdAt >= best.createdAt ? ticket : best), null);
+  if (newest?.report == null) return null;
+  return { ticketId: newest.id, title: newest.report.title, path: newest.report.path };
 }
 
 /**

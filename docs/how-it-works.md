@@ -331,12 +331,59 @@ re-read first so a finished holder releases before the refusal stands. For
 anything the board cannot see, Patches has `release_task` (optionally
 closing the task); tasks do not.
 
-An open questions ticket is open work. The automatic closes (land's reload-live
+An open questions ticket is open work, and so is an open report ticket (see
+Review reports). The automatic closes (land's reload-live
 or no-reload close, a merged or closed PR, a gone branch) give its claims back
 but leave the task open until the owner answers or the ticket is withdrawn
 (`tickets.ts`). A task withdraws only its own ticket, Patches any in her
 project, through `ask_sam` withdraw `{ticket, questions?, reason}`; the reason
 is recorded in the dossier.
+
+### Review reports
+
+A task started for a check, report or investigation leaves its findings as a
+file the owner reviews, not only in Patches' chat (on 4 Oct the Jev/Headroom
+check gave its verifiers' findings piecemeal in chat, was closed and archived,
+and left nothing to review). When a task's result is findings, not a code
+change (a check, status question, investigation, verification, research, or
+the owner asked for a report; a code task only if its brief asks), it writes
+them in full to `~/.bb/thread-storage/<taskId>/report.md`: a short "Where
+things stand" on top, its verifiers' reports untruncated, each claim checked
+against the repo, logs or sources. Then it calls `submit_report` (`path`,
+`title` up to 120 characters, an optional 1–3 line `summary`) and ends with
+`Done: report submitted, waiting on <owner> to review`. Patches may submit
+for one of her tasks with `task`.
+
+The path is checked by the host (`readReport`, rules in `report.ts`): an
+absolute path with no `.` or `..` segment to an existing, non-empty `.md`
+file under `<thread-storage root>/<taskId>/` (the root is
+`~/.bb/thread-storage`, or under bb's data dir when the host can read it from
+`BB_THREAD_STORAGE`), its realpath (and the root's) still inside the task's
+folder, so a symlink out is refused, and at most 2 MB. Anything else is
+refused with the reason. The board's read goes through the same check and
+cap, and the file is opened by its real path and re-checked after reading.
+
+A task has at most one open report ticket (ticket kind `report`, its path,
+title and summary in the dossier). Submitting again replaces them on the same
+ticket; once one is closed, the next submission opens a new one. The task's
+Patches chat is told once per submission, with the title, summary and path;
+she relays a short summary and points to the item rather than pasting the
+report. An open report ticket holds every automatic close exactly like an
+open questions ticket: the research-only idle close, the landed check,
+land's close and a merged or closed PR (`tickets.ts` `closeHold`), and
+`release_task close: true` refuses while one is open. The task itself or
+Patches can withdraw it (`ask_sam` withdraw, whole, with a reason). The
+board's first column reads "Report ready · waiting on <owner>".
+
+In Needs you it is "Review report: <title>" with its summary, path and three
+actions: **Read report** (the markdown in a popup, rendered by bb's own chat
+Markdown, with the path and Open in editor through bb's file opener), **Mark
+reviewed** (closes the ticket and the task, "Done: Report reviewed by
+<owner>"; its chats are then archived by the usual rule; open questions still
+hold it until answered) and **Follow up** (the owner's note goes to the task
+thread; the ticket stays open, and the task may submit an updated report). A
+closed task that had a report shows a **Report** link in its Completed view,
+readable after its chats are archived.
 
 ### Builder guard
 
@@ -646,12 +693,14 @@ that started routed are over nothing points at 8791.
 | `steps.ts` | A multi-step task: land's `more` as steps left, the record, when a land keeps its task open, what its thread and the board are told |
 | `recovery.ts` | When to keep the last-good build, the rollback note, dossier snapshot names, when one is due and which to prune |
 | `landguard.ts` | land's guard-file rule: a guard changes with its tests, and which tests land runs |
+| `report.ts` | Review reports: the thread-storage root, which report paths and files are accepted (realpath, `.md`, 2 MB), title and summary limits, what the task, Patches and the board say |
+| `tickets.ts` | Which open ticket holds an automatic close (questions or report), release_task's refusal, who may withdraw what |
 | `done.ts` | A research-only task that says done and sat idle 30 min; a report naming work left goes to Patches as a follow-up instead; when a closed task's chats are archived |
 | `roles.ts` | Which task a thread works for at `configure`, before the dossier has its id |
 | `validation.ts` | Stale preview, PR verdict, test-list derivation |
 | `model.ts` | Board rows, needs-you grouping, tab badges, how a closed task finished, colours |
 | `activity.ts` | The Live box: a thread's item events as terminal lines (command and output tail, read, edit, tool call, message), the limits, secret masking, which threads get a pane |
-| `archive.ts` | Closed tasks: a project's list (search, newest first, paged), per-project counts, the dossier summary, the `closed:` route, which chat to show |
+| `archive.ts` | Closed tasks: a project's list (search, newest first, paged), per-project counts, the dossier summary with its Report link, the `closed:` route, which chat to show |
 | `others.ts` | Other agents: which threads, their live state, Older, the sidebar count, which loose threads the liveness check probes |
 | `liveness.ts` | Is each task's agent alive: working, waiting, stale, errored, dead build; who is told |
 | `usage.ts` | Claude usage in the header, the 90% pause on new builds and research, bringing agents back after a limit |

@@ -293,3 +293,22 @@ describe("retireLegacyRoute", () => {
     expect(output.safeParse({ done: true, waits: null, stopped: [] }).success).toBe(false);
   });
 });
+
+describe("readReport", () => {
+  const { input, output } = hostContract.readReport;
+
+  it("takes the task, the path and whether to read it: no root, no size to trust", () => {
+    expect(input.safeParse({ taskId: "task_a", path: "/r/task_a/report.md", read: true }).success).toBe(true);
+    expect(input.safeParse({ taskId: "task_a", path: "/r/task_a/report.md", read: true, root: "/" }).success).toBe(false);
+    expect(input.safeParse({ taskId: "task_a", path: "", read: false }).success).toBe(false);
+  });
+
+  it("returns the real path, a size within 2 MB and the text, or a short refusal", () => {
+    expect(output.safeParse({ ok: true, path: "/r/task_a/report.md", size: 10, text: "# Hi" }).success).toBe(true);
+    expect(output.safeParse({ ok: true, path: "/r/task_a/report.md", size: 10, text: null }).success).toBe(true);
+    expect(output.safeParse({ ok: true, path: "/r/a.md", size: 2 * 1024 * 1024 + 1, text: null }).success).toBe(false);
+    expect(output.safeParse({ ok: true, path: "/r/a.md", size: 0, text: null }).success).toBe(false);
+    expect(output.safeParse({ ok: false, reason: "The report must be a .md file." }).success).toBe(true);
+    expect(output.safeParse({ ok: false, reason: "x".repeat(501) }).success).toBe(false);
+  });
+});

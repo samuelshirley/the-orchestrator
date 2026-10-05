@@ -17,6 +17,9 @@
 // ai.voice.transcribe turns the chat mic's recording into text on this Mac.
 // claudeSignIn starts `claude auth login` for the board's Sign in with Claude
 // button; it takes no input and returns nothing the process printed.
+// readReport validates a task's report path (report.ts: under bb's
+// thread-storage/<taskId>/, realpath'd, .md, at most 2 MB) and reads it only
+// when asked; it never writes.
 // The setup wizard (setupwizard.ts): setupFacts says the home directory and
 // whether gh and Claude are signed in, listRepos lists one folder's
 // subfolders (read-only), saveSetup writes the folder and the name into the
@@ -26,6 +29,7 @@ import { z } from "zod";
 import { LOCAL_CONFIG_MAX_CHARS } from "./localconfig";
 import { OWNER_NAME_MAX } from "./owner";
 import { PROJECTS_DIR_MAX, REPO_LIST_CAP } from "./setupwizard";
+import { REPORT_MAX_BYTES } from "./report";
 
 const text = (max: number) => z.string().max(max);
 const path = z.string().min(1).max(1000);
@@ -690,6 +694,22 @@ export const hostContract = defineRpcContract({
   claudeSignIn: {
     input: z.object({}).strict(),
     output: z.object({ ok: z.boolean(), error: text(200).nullable() }).strict(),
+  },
+  /**
+   * A task's report file (report.ts): the path checked as given, then on disk
+   * (realpath of the file and of bb's thread-storage root, regular file,
+   * non-empty, at most 2 MB). With `read`, its text too, re-checked against
+   * the cap after reading. Never writes, never follows a path out of
+   * `<thread-storage>/<taskId>/`; a refusal is ok false and why.
+   */
+  readReport: {
+    input: z.object({ taskId: text(60), path, read: z.boolean() }).strict(),
+    output: z.union([
+      z
+        .object({ ok: z.literal(true), path, size: z.number().int().min(1).max(REPORT_MAX_BYTES), text: text(REPORT_MAX_BYTES).nullable() })
+        .strict(),
+      z.object({ ok: z.literal(false), reason: text(500) }).strict(),
+    ]),
   },
   /**
    * The removed proxy's one-time retirement, one liveness beat at a time

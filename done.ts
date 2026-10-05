@@ -1,5 +1,6 @@
 // When a task with no commit and no PR is finished: a research or check task
-// whose own report says done. Its word is the only evidence, so it closes
+// whose own report says done. An open report ticket (report.ts) is an open
+// ticket: it closes when the owner marks it reviewed. Its word is the only evidence, so it closes
 // only when the dossier agrees nothing of it is open (no PR, branch,
 // worktree, build, claim, ticket or running thread) and its thread has sat
 // idle for DONE_IDLE_MS since. A done report that still names work left (a
@@ -149,7 +150,7 @@ export interface DoneArgs {
   task: Pick<Task, "closedAt" | "stage" | "buildState" | "prNumber" | "branch" | "worktreePath">;
   /** The task thread's last full report. */
   report: string | null;
-  /** The task's open tickets (questions or review). */
+  /** The task's open tickets (questions, review or report): any one keeps it open. */
   openTickets: number;
   /** The task thread or one of its children is mid-turn or queued. */
   running: boolean;

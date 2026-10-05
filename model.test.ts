@@ -649,3 +649,57 @@ describe("completionOf", () => {
     expect(completionLabel(of("whatever"))).toBe("Closed");
   });
 });
+
+// task "Critical validation of jev and headroom", 2026-10-04: findings in chat only, nothing to review.
+describe("a report waiting on the owner", () => {
+  const report = (overrides: Partial<Ticket> = {}) =>
+    ticket({
+      id: "tkt_rep",
+      kind: "report",
+      questions: [],
+      report: { path: "/Users/a/.bb/thread-storage/task_1/report.md", title: "Jev check", summary: "Jev routes.\nHeadroom is gone." },
+      ...overrides,
+    });
+
+  it("is its own Needs you item, titled by the report, with its summary and path", () => {
+    const items = needsYou({ tasks: [task()], tickets: [report()], children: [], threads: [], ownedThreadIds: new Set(["thr_task"]) });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      taskId: "task_1",
+      title: "Review report: Jev check",
+      summary: "Review report: Jev check",
+      tone: "success",
+      questionTicketId: null,
+      report: { ticketId: "tkt_rep", title: "Jev check", summary: "Jev routes.\nHeadroom is gone.", path: "/Users/a/.bb/thread-storage/task_1/report.md" },
+    });
+  });
+
+  it("folds into the task's one ticket beside its questions", () => {
+    const items = needsYou({ tasks: [task()], tickets: [ticket(), report()], children: [], threads: [], ownedThreadIds: new Set(["thr_task"]) });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ questionTicketId: "tkt_1", report: { ticketId: "tkt_rep" }, tone: "attention" });
+    expect(items[0]?.summary).toBe("Subscription tiers · 3 questions · report ready");
+  });
+
+  it("is gone once the ticket closes or the task does", () => {
+    expect(needsYou({ tasks: [task()], tickets: [report({ status: "closed" })], children: [], threads: [], ownedThreadIds: new Set() })).toEqual([]);
+    expect(needsYou({ tasks: [task({ closedAt: 5 })], tickets: [report()], children: [], threads: [], ownedThreadIds: new Set() })).toEqual([]);
+  });
+
+  it("reads Report ready · waiting on the owner on the task's row", () => {
+    const row = taskRow({
+      task: task(),
+      threads: new Map([["thr_task", thread({ id: "thr_task", status: "idle" })]]),
+      children: [],
+      tickets: [report()],
+      pullRequests: [],
+    });
+    expect(row.research).toEqual({ state: "blocked", label: "Report ready · waiting on Alex", threadId: "thr_task" });
+    expect(row.you.report).toBe(true);
+    // Questions still come first: they are the owner's to answer.
+    expect(notPlanning({ task: { note: null }, questions: 2, asking: false, report: true, taskAgent: undefined })).toMatchObject({ label: "Waiting on Alex" });
+    expect(notPlanning({ task: { note: null }, questions: 0, asking: false, report: true, taskAgent: undefined, followUp: "x" })).toMatchObject({
+      label: "Report ready · waiting on Alex",
+    });
+  });
+});

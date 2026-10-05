@@ -3,6 +3,9 @@
 // a merged/closed PR or a gone branch): the task gives its claims back but
 // stays open until the owner answers or the ticket is withdrawn with a reason
 // (task_uf5p8wat0b's two questions vanished with its close on 2026-09-29).
+// An open report ticket (report.ts) holds them the same way, and so does
+// release_task close: the task closes when the owner marks the report
+// reviewed, or the ticket is withdrawn with a reason.
 // Review tickets hold nothing: a merged or closed PR voids the hand-off.
 // Pure; tickets.test.ts pins it.
 import { owner } from "./owner";
@@ -14,27 +17,45 @@ export const WITHDRAW_REASON_MIN = 10;
 
 type Holding = Pick<Ticket, "id" | "kind" | "questions">;
 
-/** The open questions ticket that holds an automatic close, or null when none does. */
-export function closeHold(openTickets: readonly Holding[]): { ticketId: string; questions: number } | null {
-  const ticket = openTickets.find((open) => open.kind === "questions");
-  return ticket === undefined ? null : { ticketId: ticket.id, questions: ticket.questions.length };
+/** What holds a close: an open questions ticket, or a report waiting on the owner's review. */
+export interface CloseHold {
+  ticketId: string;
+  kind: "questions" | "report";
+  questions: number;
+}
+
+/** The open questions or report ticket that holds an automatic close, or null when none does. Questions first. */
+export function closeHold(openTickets: readonly Holding[]): CloseHold | null {
+  const ticket = openTickets.find((open) => open.kind === "questions") ?? openTickets.find((open) => open.kind === "report");
+  if (ticket === undefined) return null;
+  return { ticketId: ticket.id, kind: ticket.kind === "report" ? "report" : "questions", questions: ticket.questions.length };
 }
 
 const count = (n: number) => `${n} open question${n === 1 ? "" : "s"}`;
 
+/** "has 2 open questions to Alex" / "has a report waiting on Alex to review". */
+export function holdWhat(hold: CloseHold): string {
+  return hold.kind === "report" ? `has a report waiting on ${owner()} to review` : `has ${count(hold.questions)} to ${owner()}`;
+}
+
 /** Told to the task thread when an automatic close is held: `what` is why it would have closed. */
-export function heldCloseMessage(taskId: string, hold: { ticketId: string; questions: number }, what: string): string {
-  return `${what} ${taskId} stays open: its ticket ${hold.ticketId} has ${count(hold.questions)} to ${owner()}. Its claims are released. It closes on its own once they are answered or withdrawn (ask_sam withdraw, with a reason).`;
+export function heldCloseMessage(taskId: string, hold: CloseHold, what: string): string {
+  const until =
+    hold.kind === "report"
+      ? `once ${owner()} marks the report reviewed, or the ticket is withdrawn (ask_sam withdraw, with a reason)`
+      : "once they are answered or withdrawn (ask_sam withdraw, with a reason)";
+  return `${what} ${taskId} stays open: its ticket ${hold.ticketId} ${holdWhat(hold)}. Its claims are released. It closes on its own ${until}.`;
 }
 
 /** The meta key that remembers which ticket a held close was told about, so it is told once. */
 export const closeHeldKey = (taskId: string) => `close_held:${taskId}`;
 
-/** release_task close: true refuses while a questions ticket is open. */
+/** release_task close: true refuses while a questions or report ticket is open. */
 export function releaseCloseRefusal(openTickets: readonly Holding[]): string | null {
   const hold = closeHold(openTickets);
   if (hold === null) return null;
-  return `${hold.ticketId} has ${count(hold.questions)} to ${owner()}: withdraw ${hold.ticketId} with a reason first (ask_sam withdraw), or let ${owner()} answer it.`;
+  const or = hold.kind === "report" ? `let ${owner()} mark the report reviewed` : `let ${owner()} answer it`;
+  return `${hold.ticketId} ${holdWhat(hold)}: withdraw ${hold.ticketId} with a reason first (ask_sam withdraw), or ${or}.`;
 }
 
 export type WithdrawCaller = { kind: "orchestrator"; projectId: string } | { kind: "task"; taskId: string } | null;
@@ -63,7 +84,7 @@ export function withdrawDecision({
   if (ticket.status !== "open") return `${ticket.id} is already closed.`;
   if (caller.kind === "task") {
     if (ticket.taskId !== caller.taskId) return `${ticket.id} belongs to ${ticket.taskId}; you can withdraw only your own task's tickets.`;
-    if (ticket.kind !== "questions") return `${ticket.id} is a review hand-off: only Patches withdraws it.`;
+    if (ticket.kind === "review") return `${ticket.id} is a review hand-off: only Patches withdraws it.`;
   } else if (ticketTask === null || ticketTask.projectId !== caller.projectId) {
     return `${ticket.id} is not in this chat's project: ask in its own Patches chat.`;
   }
@@ -71,7 +92,7 @@ export function withdrawDecision({
     return `Give the reason (at least ${WITHDRAW_REASON_MIN} characters): it goes in the dossier.`;
   }
   if (questions === undefined || questions.length === 0) return { kind: "ticket" };
-  if (ticket.kind !== "questions") return `${ticket.id} is a review hand-off: withdraw it whole, without questions.`;
+  if (ticket.kind !== "questions") return `${ticket.id} is a ${ticket.kind === "report" ? "report" : "review hand-off"}: withdraw it whole, without questions.`;
   const total = ticket.questions.length;
   for (const n of questions) {
     if (!Number.isInteger(n) || n < 1 || n > total) return `${ticket.id} has questions 1-${total}; there is no question ${n}.`;

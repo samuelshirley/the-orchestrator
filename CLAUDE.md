@@ -80,6 +80,11 @@ what must not break.
   bb refuses messages to (queued failureReason, e.g. `workspace_busy`) is
   blocked, not idle; blocked Patches chats get a line on the board. A stale bb
   checkout claim: `docs/how-it-works.md` "A locked checkout".
+- A task whose result is findings (a check, investigation, research, or a
+  report asked for) writes them to `<thread-storage>/<taskId>/report.md` and
+  calls `submit_report` (`report.ts`: path checked and realpath'd, 2 MB cap).
+  Its one report ticket is "Review report: <title>" in Needs you and holds
+  every close like questions; Mark reviewed closes the task.
 - Every ask says what the owner does: a decision with options and a pick, or a
   command only they can run. `validateAsk` (`attention.ts`) refuses the rest.
 - Claude signed out (`signin.ts`): one Needs you item with the sign-in command

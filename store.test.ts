@@ -444,3 +444,52 @@ describe("browser lease", () => {
     });
   });
 });
+
+describe("report tickets", () => {
+  const report = (title: string) => ({ path: `/r/task/${title}.md`, title, summary: null });
+
+  it("keeps at most one open per task: submitting again replaces it, never stacks", () => {
+    const store = fresh();
+    const task = store.createTask({ projectId: "proj_f", title: "Check", brief: "b" });
+    const first = store.submitReport(task.id, { path: "/r/a.md", title: "First", summary: "One line." });
+    expect(first.replaced).toBe(false);
+    expect(first.ticket).toMatchObject({ kind: "report", status: "open", questions: [], report: { path: "/r/a.md", title: "First", summary: "One line." } });
+    const second = store.submitReport(task.id, { path: "/r/b.md", title: "Second", summary: null });
+    expect(second).toMatchObject({ replaced: true, ticket: { id: first.ticket.id, report: { path: "/r/b.md", title: "Second", summary: null } } });
+    expect(store.tickets({ status: "open" }).filter((t) => t.kind === "report")).toHaveLength(1);
+    expect(store.latestReport(task.id)?.report?.title).toBe("Second");
+  });
+
+  it("opens a new one after the last was reviewed, and Completed still finds the newest", () => {
+    const store = fresh();
+    const task = store.createTask({ projectId: "proj_f", title: "Check", brief: "b" });
+    const first = store.submitReport(task.id, report("first")).ticket;
+    store.closeTicket(first.id, null);
+    const next = store.submitReport(task.id, report("second"));
+    expect(next.replaced).toBe(false);
+    expect(next.ticket.id).not.toBe(first.id);
+    expect(store.latestReport(task.id)?.id).toBe(next.ticket.id);
+    expect(store.latestReport("task_none")).toBeNull();
+  });
+
+  it("is a ticket of its own: questions and a report live side by side", () => {
+    const store = fresh();
+    const task = store.createTask({ projectId: "proj_f", title: "Check", brief: "b" });
+    store.addQuestions(task.id, [q("Which?")], 3);
+    store.submitReport(task.id, report("r"));
+    expect(store.openTicket(task.id, "questions")?.questions).toEqual([line("Which?")]);
+    expect(store.openTicket(task.id, "report")?.report?.title).toBe("r");
+    expect(store.ticket(store.openTicket(task.id, "questions")!.id)?.report).toBeNull();
+  });
+
+  it("closes with its task, and a withdrawal records which report went", () => {
+    const store = fresh();
+    const task = store.createTask({ projectId: "proj_f", title: "Check", brief: "b" });
+    const { ticket } = store.submitReport(task.id, report("Jev check"));
+    store.withdrawTicket(ticket.id, { reason: "Superseded by the successor task.", by: "patches" });
+    expect(store.withdrawals(task.id)).toMatchObject([{ ticketId: ticket.id, questions: ["Report: Jev check"], by: "patches" }]);
+    const again = store.submitReport(task.id, report("Again")).ticket;
+    store.closeTask(task.id, "Done: Report reviewed by Alex");
+    expect(store.ticket(again.id)?.status).toBe("closed");
+  });
+});

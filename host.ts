@@ -40,6 +40,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   realpath,
@@ -101,6 +102,7 @@ import { askRoute } from "./modelroute.js";
 import { JEV_KEY_PATH, KEY_FILE_MAX_CHARS, jevKey, keyStale, repoEnvPath, type KeyReading, type KeySource } from "./typesafe.js";
 import { LOCAL_CONFIG_LAST_GOOD, LOCAL_CONFIG_MAX_CHARS, LOCAL_CONFIG_PATH, parseLocalConfig } from "./localconfig.js";
 import { githubSlug } from "./profiles.js";
+import { dataDirFromThreadStorage, REPORT_MAX_BYTES, reportFactsRefusal, reportPathRefusal, threadStorageRoot, type ReportFacts } from "./report.js";
 import {
   GIT_CONFIG_MAX_CHARS,
   REPO_LIST_CAP,
@@ -1321,6 +1323,43 @@ function commandEnd(command: string, args: string[], env: NodeJS.ProcessEnv): Pr
   });
 }
 
+/**
+ * A task's report (contract `readReport`, report.ts): the path as given, then
+ * what is on disk. The file is opened by its real path, and what was read is
+ * checked again (same file, within the cap), so a swap between the check and
+ * the read is refused, not followed.
+ */
+async function readReport(taskId: string, path: string, read: boolean) {
+  // bb's data dir when this process was started with a thread's storage path, else ~/.bb.
+  const root = threadStorageRoot(homedir(), dataDirFromThreadStorage(process.env.BB_THREAD_STORAGE));
+  const refused = (reason: string) => ({ ok: false as const, reason: reason.slice(0, 500) });
+  const lexical = reportPathRefusal({ path, taskId, root });
+  if (lexical !== null) return refused(lexical);
+  let facts: ReportFacts;
+  try {
+    const [realPath, realRoot] = await Promise.all([realpath(path), realpath(root)]);
+    const info = await stat(realPath);
+    facts = { exists: true, realPath, realRoot, isFile: info.isFile(), size: info.size };
+  } catch {
+    facts = { exists: false };
+  }
+  const why = reportFactsRefusal({ taskId, facts });
+  if (why !== null || !facts.exists) return refused(why ?? "There is no file at that path.");
+  if (!read) return { ok: true as const, path: facts.realPath, size: facts.size, text: null };
+  const handle = await open(facts.realPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(() => null);
+  if (handle === null) return refused("The report could not be opened.");
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size <= 0 || info.size > REPORT_MAX_BYTES) return refused("The report changed while it was read.");
+    const buffer = Buffer.alloc(REPORT_MAX_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead === 0 || bytesRead > REPORT_MAX_BYTES) return refused("The report changed while it was read.");
+    return { ok: true as const, path: facts.realPath, size: bytesRead, text: buffer.subarray(0, bytesRead).toString("utf8") };
+  } finally {
+    await handle.close();
+  }
+}
+
 /** The setup wizard's facts (contract `setupFacts`): home, and who gh and Claude say is signed in. */
 async function setupFacts() {
   const [gh, claude] = await Promise.all([
@@ -1833,6 +1872,8 @@ export default experimental_defineHostEntry({
     },
 
     setupFacts: () => setupFacts(),
+
+    readReport: ({ taskId, path, read }) => readReport(taskId, path, read),
 
     listRepos: ({ dir }) => listReposIn(dir, homedir()),
 

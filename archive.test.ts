@@ -234,6 +234,25 @@ describe("closedTaskSummary", () => {
     });
   });
 
+  it("has no Report link when the task had no report", () => {
+    expect(summary.report).toBeNull();
+  });
+
+  it("links the task's newest report, reviewed or not, so it can be read after archiving", () => {
+    const rep = (id: string, title: string, createdAt: number, taskId = "t1") =>
+      ticket(id, { taskId, kind: "report", createdAt, report: { path: `/r/t1/${title}.md`, title, summary: null } });
+    const withReports = closedTaskSummary({
+      task: landed,
+      tickets: [...tickets, rep("tkt_rep1", "first", 40), rep("tkt_rep2", "second", 60), rep("tkt_foreign_rep", "theirs", 99, "t2")],
+      withdrawals,
+      releases,
+      children,
+    });
+    expect(withReports.report).toEqual({ ticketId: "tkt_rep2", title: "second", path: "/r/t1/second.md" });
+    // A report is not a question.
+    expect(withReports.questions).toEqual(summary.questions);
+  });
+
   it("has a sha only when it landed", () => {
     const merged = closedTaskSummary({
       task: task("t1", { note: "PR #12 merged." }),

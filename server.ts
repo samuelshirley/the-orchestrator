@@ -83,12 +83,28 @@ import {
   closeHeldKey,
   closeHold,
   heldCloseMessage,
+  holdWhat,
+  type CloseHold,
   releaseCloseRefusal,
   withdrawDecision,
   withdrawnByPatchesMessage,
   withdrawnWhat,
 } from "./tickets.js";
 import { landCandidate, landedClose, REPORT_MAX, reportKey } from "./landed.js";
+import {
+  REPORT_FOLLOW_UP_MAX,
+  REPORT_SUMMARY_MAX,
+  REPORT_TITLE_MAX,
+  followUpRefusal,
+  reportFollowUpMessage,
+  reportReviewedMessage,
+  reportReviewedNote,
+  reportSubmittedReply,
+  reportSummary,
+  reportTitleRefusal,
+  reportToldMessage,
+  type ReportRef,
+} from "./report.js";
 import {
   decideReload,
   parsePendingReload,
@@ -364,7 +380,9 @@ const askSchema = z.discriminatedUnion("kind", [
 const ticketViewSchema = z.object({
   id: z.string(),
   taskId: z.string(),
-  kind: z.enum(["questions", "review"]),
+  kind: z.enum(["questions", "review", "report"]),
+  /** A report ticket's file, title and summary (report.ts); null on other kinds. */
+  report: z.object({ path: z.string(), title: z.string(), summary: z.string().nullable() }).nullable().optional(),
   questions: z.array(z.string()),
   asks: z.array(askSchema),
   answers: z.array(z.string()).nullable(),
@@ -520,6 +538,8 @@ const closedTaskViewSchema = z
         })
         .strict(),
     ),
+    /** Its newest report, readable after archiving (report_read). */
+    report: z.object({ ticketId: z.string(), title: z.string(), path: z.string() }).strict().nullable(),
   })
   .strict();
 export type ClosedTaskView = z.infer<typeof closedTaskViewSchema>;
@@ -754,6 +774,25 @@ export const rpcContract = defineRpcContract({
   },
   ticket_close: {
     input: z.object({ ticketId: z.string().min(1).max(100) }).strict(),
+    output: ok,
+  },
+  /**
+   * A report's markdown for the board (report.ts): the ticket's path checked
+   * again by the host, same rules and 2 MB cap. Read-only; closed tickets too
+   * (Completed's Report link).
+   */
+  report_read: {
+    input: z.object({ ticketId: z.string().min(1).max(100) }).strict(),
+    output: z.object({ title: z.string(), path: z.string(), text: z.string(), hostId: z.string() }).strict(),
+  },
+  /** The owner's Mark reviewed: the report ticket closes, and the task with it ("Report reviewed by <owner>"). */
+  report_reviewed: {
+    input: z.object({ ticketId: z.string().min(1).max(100) }).strict(),
+    output: z.object({ closed: z.boolean() }).strict(),
+  },
+  /** The owner's Follow up: their note goes to the task thread; the report ticket stays open. */
+  report_follow_up: {
+    input: z.object({ ticketId: z.string().min(1).max(100), note: z.string().max(REPORT_FOLLOW_UP_MAX) }).strict(),
     output: ok,
   },
   /** The owner's Retry on a failed build: the same touches and instructions again. */
@@ -1268,11 +1307,12 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // ------------------------------------------------------------ held closes
-  // tickets.ts: an open questions ticket holds every automatic close. The task
-  // gives its claims back and stays open; it closes once the owner answers or the
-  // ticket is withdrawn (landed.ts, closeIfStale), never taking it along.
+  // tickets.ts: an open questions or report ticket holds every automatic close.
+  // The task gives its claims back and stays open; it closes once the owner
+  // answers (or marks the report reviewed) or the ticket is withdrawn
+  // (landed.ts, closeIfStale), never taking it along.
 
-  /** The open questions ticket holding an automatic close of this task, or null. */
+  /** The open questions or report ticket holding an automatic close of this task, or null. */
   function closeHoldFor(taskId: string) {
     return closeHold(store.tickets({ status: "open" }).filter((ticket) => ticket.taskId === taskId));
   }
@@ -1282,18 +1322,18 @@ export default async function plugin(bb: BbPluginApi) {
    * still has claims, so polling adds no release rows). True the first time
    * this ticket holds the task, so the caller tells its thread once.
    */
-  function holdClose(task: Task, hold: { ticketId: string; questions: number }, reason: string): boolean {
+  function holdClose(task: Task, hold: CloseHold, reason: string): boolean {
     if (store.claimsFor(task.id).length > 0) {
-      store.releaseTask(task.id, { reason: `${reason} Kept open: ${hold.ticketId} has open questions to ${owner()}.`, by: "auto", close: false });
+      store.releaseTask(task.id, { reason: `${reason} Kept open: ${hold.ticketId} ${holdWhat(hold)}.`, by: "auto", close: false });
       changed(store.task(task.id) ?? task);
     }
     if (store.getMeta(closeHeldKey(task.id)) === hold.ticketId) return false;
     store.setMeta(closeHeldKey(task.id), hold.ticketId);
-    bb.log.info(`${task.id} kept open (${reason}): ${hold.ticketId} has ${hold.questions} open question(s) to ${owner()}`);
+    bb.log.info(`${task.id} kept open (${reason}): ${hold.ticketId} ${holdWhat(hold)}`);
     return true;
   }
 
-  async function tellHeld(task: Task, hold: { ticketId: string; questions: number }, what: string) {
+  async function tellHeld(task: Task, hold: CloseHold, what: string) {
     if (task.threadId === null) return;
     try {
       await tellThread(task.threadId, heldCloseMessage(task.id, hold, what));
@@ -2501,7 +2541,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "ask_sam",
-    description: `Bring ${owner()} this task's asks as ONE ticket; at most ${MAX_OPEN_QUESTIONS} open per task. Only for what ${owner()} alone can decide or run. Each ask says exactly what they do: a "decision" with 2-5 options and the index of the one you recommend, or a "command" they must run themself, with the reason only they can (${SAM_ONLY_REASONS.join(", ")}). Anything you can run, run. Record what you decided yourself in decisions. To reword earlier asks, send the full current set with replace: true. To withdraw an open ticket or some of its questions (no longer needed, settled another way), use withdraw with the reason: it leaves Needs you and the reason goes in the dossier; never just say in chat that you withdrew it. A task withdraws only its own ticket; Patches any in her project. End your turn after asking: the answers come back to the task thread. Patches: no task for it yet? start_task first. A question written in chat never reaches ${owners()} Needs you.`,
+    description: `Bring ${owner()} this task's asks as ONE ticket; at most ${MAX_OPEN_QUESTIONS} open per task. Only for what ${owner()} alone can decide or run. Each ask says exactly what they do: a "decision" with 2-5 options and the index of the one you recommend, or a "command" they must run themself, with the reason only they can (${SAM_ONLY_REASONS.join(", ")}). Anything you can run, run. Record what you decided yourself in decisions. To reword earlier asks, send the full current set with replace: true. To withdraw an open ticket or some of its questions (no longer needed, settled another way), or a report ticket, use withdraw with the reason: it leaves Needs you and the reason goes in the dossier; never just say in chat that you withdrew it. A task withdraws only its own ticket; Patches any in her project. End your turn after asking: the answers come back to the task thread. Patches: no task for it yet? start_task first. A question written in chat never reaches ${owners()} Needs you.`,
     parameters: z.object({
       task: taskId,
       questions: z.array(askSchema).max(MAX_OPEN_QUESTIONS).default([]),
@@ -2603,6 +2643,61 @@ export default async function plugin(bb: BbPluginApi) {
     const left = after.status === "open" ? `; ${after.questions.length} question(s) still open` : "; it is closed and off Needs you";
     return { ok: true, text: `Withdrew ${withdrawnWhat(plan)} of ${id}${left}. The reason is in the dossier.` };
   }
+
+  // ---------------------------------------------------------------- reports
+  // report.ts: a task's findings as a file under bb's thread storage, one open
+  // report ticket per task, read and checked only through the host.
+
+  /** A task's report file through the primary host, which holds bb's thread storage. */
+  async function reportFile(taskId: string, path: string, read: boolean) {
+    const hostId = (await bb.sdk.system.config()).primaryHostId ?? null;
+    if (hostId === null) return { ok: false as const, reason: "No host is connected to check the report on." };
+    const file = await host.call("readReport", { taskId, path, read }, { hostId, timeoutMs: 30_000 });
+    return file.ok ? { ...file, hostId } : file;
+  }
+
+  /** Tell the task's Patches chat once per submission; not when she submitted it herself. */
+  async function tellReport(task: Task, report: ReportRef, replaced: boolean, from: string) {
+    if (chatThread(task.projectId) === from) return;
+    const message = reportToldMessage(task, report, replaced);
+    try {
+      const chat = await ensureChat(await projectById(task.projectId), message);
+      if (!chat.started) await tellThread(chat.threadId, message);
+    } catch (error) {
+      bb.log.warn(`telling Patches about ${task.id}'s report failed: ${describeError(error)}`);
+    }
+  }
+
+  bb.agents.registerTool({
+    name: "submit_report",
+    description: `Hand ${owner()} this task's findings to review: a markdown file you wrote under bb's thread storage, <thread-storage>/<task id>/report.md (an absolute .md path, at most 2 MB, no symlinks out). It opens (or, submitted again, updates) the task's one report ticket: "Review report: <title>" in ${owners()} Needs you. The task stays open until ${owner()} marks it reviewed. Task threads; Patches may pass task.`,
+    parameters: z.object({
+      task: taskId,
+      path: z.string().min(1).max(1000).describe("Absolute path of the report: <thread-storage>/<task id>/report.md."),
+      title: z.string().min(1).max(REPORT_TITLE_MAX).describe(`One line, at most ${REPORT_TITLE_MAX} characters.`),
+      summary: z.string().max(REPORT_SUMMARY_MAX + 20).optional().describe("1-3 short lines: where things stand."),
+    }),
+    presentation: { label: { pending: "Submitting a report", completed: "Submitted a report" } },
+    async execute({ task: arg, path, title, summary }, ctx) {
+      try {
+        const task = taskFor(ctx.threadId, arg);
+        const badTitle = reportTitleRefusal(title);
+        if (badTitle !== null) return fail(`Not submitted: ${badTitle}`);
+        const lines = reportSummary(summary);
+        if (!lines.ok) return fail(`Not submitted: ${lines.reason}`);
+        const file = await reportFile(task.id, path, false);
+        if (!file.ok) return fail(`Not submitted: ${file.reason}`);
+        const report: ReportRef = { path: file.path, title: title.trim(), summary: lines.summary };
+        const { ticket, replaced } = store.submitReport(task.id, report);
+        changed(store.task(task.id) ?? task);
+        bb.log.info(`${task.id} ${replaced ? "updated" : "submitted"} report ${ticket.id}: ${report.path}`);
+        void tellReport(task, report, replaced, ctx.threadId);
+        return text(reportSubmittedReply(ticket.id, replaced));
+      } catch (error) {
+        return fail(describeError(error));
+      }
+    },
+  });
 
   bb.agents.registerTool({
     name: "open_pr",
@@ -3151,7 +3246,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "release_task",
     description:
-      "Patches only. Give a task's claims and build slot back, with the reason recorded in the dossier; close: true also closes the task, refused while it has an open questions ticket (withdraw it first, with a reason). Claims release themselves when the task's PR merges or closes, or its branch is gone with its commits on the default branch; use this only when that cannot see it (work merged some other way, an abandoned task).",
+      "Patches only. Give a task's claims and build slot back, with the reason recorded in the dossier; close: true also closes the task, refused while it has an open questions or report ticket (withdraw it first, with a reason). Claims release themselves when the task's PR merges or closes, or its branch is gone with its commits on the default branch; use this only when that cannot see it (work merged some other way, an abandoned task).",
     parameters: z.object({
       task: z.string().min(1).max(40).describe("Task id."),
       reason: z.string().min(10).max(2000).describe("Why, with the evidence you checked (PR, commit, branch)."),
@@ -3224,8 +3319,8 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   // ------------------------------------------------------------- configure
-  const ORCHESTRATOR_TOOLS = ["start_task", "research", "build", "ask_sam", "open_pr", "land", "ready_for_review", "release_task", "task_status", "browser"];
-  const TASK_TOOLS = ["research", "build", "ask_sam", "open_pr", "land", "ready_for_review", "task_status", "browser"];
+  const ORCHESTRATOR_TOOLS = ["start_task", "research", "build", "ask_sam", "submit_report", "open_pr", "land", "ready_for_review", "release_task", "task_status", "browser"];
+  const TASK_TOOLS = ["research", "build", "ask_sam", "submit_report", "open_pr", "land", "ready_for_review", "task_status", "browser"];
   const RESEARCH_TOOLS = ["browser"];
 
   bb.agents.configure((context) => {
@@ -4882,6 +4977,51 @@ export default async function plugin(bb: BbPluginApi) {
       const task = store.task(ticket.taskId);
       if (task !== null) changed(store.updateTask(task.id, answeredTaskPatch(task)));
       else publish();
+      return { ok: true as const };
+    },
+
+    report_read: async ({ ticketId }) => {
+      const ticket = store.ticket(ticketId);
+      if (ticket === null || ticket.kind !== "report" || !ticket.report) throw new Error("No such report.");
+      const file = await reportFile(ticket.taskId, ticket.report.path, true);
+      if (!file.ok) throw new Error(file.reason);
+      return { title: ticket.report.title, path: file.path, text: file.text ?? "", hostId: file.hostId };
+    },
+
+    report_reviewed: async ({ ticketId }) => {
+      const ticket = store.ticket(ticketId);
+      if (ticket === null || ticket.kind !== "report") throw new Error("No such report.");
+      if (ticket.status !== "open") throw new Error("That report is already reviewed or withdrawn.");
+      const task = store.task(ticket.taskId);
+      store.closeTicket(ticket.id, null);
+      // Open questions still hold the task (tickets.ts): it closes once they are answered.
+      const closes = task !== null && task.closedAt === null && closeHoldFor(task.id) === null;
+      if (task !== null && closes) {
+        closeTask(task.id, reportReviewedNote());
+        store.setMeta(idleKey(task.id), null);
+        store.setMeta(closeHeldKey(task.id), null);
+        bb.log.info(`${task.id} closed: ${reportReviewedNote()}`);
+        void cleanupWorktree(task.id);
+        if (task.threadId !== null) {
+          void tellThread(task.threadId, reportReviewedMessage(task.id)).catch((error: unknown) =>
+            bb.log.warn(`telling ${task.id} its report was reviewed failed: ${describeError(error)}`),
+          );
+        }
+      }
+      publish();
+      return { closed: closes };
+    },
+
+    report_follow_up: async ({ ticketId, note }) => {
+      const refused = followUpRefusal(note);
+      if (refused !== null) throw new Error(refused);
+      const ticket = store.ticket(ticketId);
+      if (ticket === null || ticket.kind !== "report") throw new Error("No such report.");
+      if (ticket.status !== "open") throw new Error("That report is already reviewed or withdrawn.");
+      const task = store.task(ticket.taskId);
+      if (task === null || task.threadId === null || task.closedAt !== null) throw new Error("That report's task has no open thread.");
+      await tellThread(task.threadId, reportFollowUpMessage(ticket.id, note));
+      bb.log.info(`${Owner()} followed up on ${task.id}'s report ${ticket.id}`);
       return { ok: true as const };
     },
 

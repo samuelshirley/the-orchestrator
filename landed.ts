@@ -107,7 +107,7 @@ export function openWork({
   stepsLeft,
 }: {
   task: Pick<Task, "buildState">;
-  /** The task's open tickets (questions or review). */
+  /** The task's open tickets (questions, review or report: a report waits on the owner's review). */
   openTickets: number;
   /** The task thread or one of its children is mid-turn or queued. */
   running: boolean;
@@ -122,7 +122,7 @@ export function openWork({
   if (task.buildState === "preparing" || task.buildState === "running") return "a build is in flight";
   if (task.buildState === "failed") return "a failed build is still the task's";
   if (reloadPending === true) return "a reload is pending";
-  if (openTickets > 0) return "a question or review is open";
+  if (openTickets > 0) return "a question, review or report is open";
   if (running) return "an agent of the task is working";
   if (stepsLeft !== undefined && stepsLeft > 0) return `${STEPS_LEFT_PREFIX}${stepsLeft}`;
   return null;

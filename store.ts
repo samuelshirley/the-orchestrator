@@ -8,6 +8,7 @@ import { actualOutcome, type JevAskRecord, type JevWatchRow, type OutcomeFacts }
 import type { RouteRecord } from "./modelroute";
 import { reportKey } from "./landed";
 import type { Claim } from "./claims";
+import type { ReportRef } from "./report";
 
 export interface SqlStatement {
   run(...params: unknown[]): unknown;
@@ -136,6 +137,9 @@ export const MIGRATIONS: readonly string[] = [
      jev_model TEXT,
      error TEXT
    )`,
+  `ALTER TABLE tickets ADD COLUMN report_path TEXT`,
+  `ALTER TABLE tickets ADD COLUMN report_title TEXT`,
+  `ALTER TABLE tickets ADD COLUMN report_summary TEXT`,
 ];
 
 export interface ModelRoute {
@@ -213,8 +217,11 @@ export interface Task {
 export interface Ticket {
   id: string;
   taskId: string;
-  /** "questions": the owner answers. "review": the PR is proven; the owner tests and merges. */
-  kind: "questions" | "review";
+  /**
+   * "questions": the owner answers. "review": the PR is proven; the owner tests
+   * and merges. "report": a task's findings wait on the owner's review (report.ts).
+   */
+  kind: "questions" | "review" | "report";
   questions: string[];
   /** The structured form of each question, same order; empty on old tickets. */
   asks: Ask[];
@@ -222,6 +229,11 @@ export interface Ticket {
   status: "open" | "closed";
   createdAt: number;
   closedAt: number | null;
+  /**
+   * A report ticket's file, title and summary; null on every other kind.
+   * Always set by the store; optional so Ticket literals elsewhere need not change.
+   */
+  report?: ReportRef | null;
 }
 
 /** A task's claims given back: by Patches (release_task) or automatically. */
@@ -318,16 +330,20 @@ function toTask(row: Row): Task {
 }
 
 function toTicket(row: Row): Ticket {
+  const kind = row.kind === "review" || row.kind === "report" ? row.kind : "questions";
+  const path = str(row.report_path);
+  const title = str(row.report_title);
   return {
     id: String(row.id),
     taskId: String(row.task_id),
-    kind: row.kind === "review" ? "review" : "questions",
+    kind,
     questions: parseJson<string[]>(row.questions, []),
     asks: parseJson<Ask[]>(row.asks, []),
     answers: parseJson<string[] | null>(row.answers, null),
     status: row.status === "closed" ? "closed" : "open",
     createdAt: num(row.created_at) ?? 0,
     closedAt: num(row.closed_at),
+    report: kind === "report" && path !== null && title !== null ? { path, title, summary: str(row.report_summary) } : null,
   };
 }
 
@@ -655,6 +671,39 @@ export class Store {
     });
   }
 
+  /**
+   * A task's report for the owner: at most one open report ticket per task.
+   * Submitting again replaces its path, title and summary on the same ticket;
+   * it never stacks.
+   */
+  submitReport(taskId: string, report: ReportRef): { ticket: Ticket; replaced: boolean } {
+    return this.transaction(() => {
+      const open = this.openTicket(taskId, "report");
+      if (open !== null) {
+        this.db
+          .prepare("UPDATE tickets SET report_path = ?, report_title = ?, report_summary = ? WHERE id = ?")
+          .run(report.path, report.title, report.summary, open.id);
+        return { ticket: this.ticket(open.id) as Ticket, replaced: true };
+      }
+      const id = randomId("tkt");
+      this.db
+        .prepare(
+          `INSERT INTO tickets (id, task_id, kind, questions, status, created_at, report_path, report_title, report_summary)
+           VALUES (?, ?, 'report', '[]', 'open', ?, ?, ?, ?)`,
+        )
+        .run(id, taskId, this.now(), report.path, report.title, report.summary);
+      return { ticket: this.ticket(id) as Ticket, replaced: false };
+    });
+  }
+
+  /** The task's newest report ticket, open or closed (Completed's Report link), or null. */
+  latestReport(taskId: string): Ticket | null {
+    const row = this.db
+      .prepare("SELECT * FROM tickets WHERE task_id = ? AND kind = 'report' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? null : toTicket(row);
+  }
+
   /** Void the task's open review hand-off; returns it, or null when there was none. */
   closeReview(taskId: string): Ticket | null {
     return this.transaction(() => {
@@ -671,7 +720,9 @@ export class Store {
       const ticket = this.ticket(id);
       if (ticket === null || ticket.status !== "open") throw new Error(`${id} is not an open ticket.`);
       this.closeTicket(id, null);
-      this.recordWithdrawal(ticket, ticket.questions, reason, by);
+      // A report has no questions: the withdrawal records which report went.
+      const what = ticket.kind === "report" && ticket.report ? [`Report: ${ticket.report.title}`] : ticket.questions;
+      this.recordWithdrawal(ticket, what, reason, by);
       return this.ticket(id) as Ticket;
     });
   }

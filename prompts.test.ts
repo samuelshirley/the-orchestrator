@@ -10,6 +10,8 @@ import {
   HOW_TO_OPEN_RULE,
   WORKTREE_CD_RULE,
   INSTRUCTIONS_MAX,
+  REPORT_RULE,
+  taskDetail,
   PLUMBING_RULE,
   buildPrompt,
   BUILDER_GUARD_RULE,
@@ -148,6 +150,7 @@ describe("instructions", () => {
       expect(own).toContain(sharedBrowserRules(ACCOUNT));
       expect(own.endsWith("…")).toBe(false);
       expect(own, profile.key).toContain("Drop an ask only via ask_sam withdraw; an open one holds this task open after landing.");
+      expect(own, profile.key).toContain(REPORT_RULE);
       const builder = builderInstructions(task({ title: "y".repeat(120) }), profile);
       expect(builder.length).toBeLessThanOrEqual(INSTRUCTIONS_MAX);
       expect(builder).toContain(builderBrowserRule());
@@ -216,6 +219,7 @@ describe("instructions", () => {
     expect(text).toContain("only as ask_sam tickets, never chat text");
     // A ticket goes only with a reason in the dossier; an open question holds a close.
     expect(text).toContain("Drop one only via ask_sam withdraw with a reason; an open one holds its task open past landing.");
+    expect(text).toContain('A report too: relay its summary, point to "Review report" in Needs you; never paste it.');
     expect(text).toContain("task_11");
     expect(text).not.toContain("start_task must name the project");
     expect(text.length).toBeLessThanOrEqual(INSTRUCTIONS_MAX);
@@ -479,7 +483,7 @@ describe("the owner's name", () => {
     setOwner("Robin");
     expect(patchesInstructions("- none", scope)).toContain("You are Patches, Robin's project manager in The Orchestrator. Robin is the brain; you run the team.");
     expect(patchesInstructions("- none", scope)).toContain("Merge is a production deploy and it is always Robin's.");
-    expect(taskInstructions(task(), "Acme Shop", scope.profile, ACCOUNT)).toContain("Never hand Robin something you can run; they see a failed build only after you have tried twice.");
+    expect(taskInstructions(task(), "Acme Shop", scope.profile, ACCOUNT)).toContain("Never hand Robin something you can run.");
     expect(researchInstructions(task(), ACCOUNT)).toContain("Never ask Robin to use or close a browser except for that sign-in.");
     expect(newTaskPrompt(task(), "Acme Shop", [])).toContain("Robin started this task themself with New task");
     const answers = [{ question: "Which price?", answer: "$4" }];
@@ -499,5 +503,40 @@ describe("the owner's name", () => {
   it("never changes a tool name, whoever runs it", () => {
     setOwner("Robin");
     for (const text of all()) expect(text).not.toMatch(/ask_robin/i);
+  });
+});
+
+// task "Critical validation of jev and headroom", 2026-10-04: its verifiers'
+// findings reached Kim only piecemeal in chat, and nothing was left to review.
+describe("review reports", () => {
+  it("has a task whose result is findings write them in full and submit them before its Done line", () => {
+    for (const profile of ALL) {
+      const own = taskInstructions(task({ id: "task_abc" }), "P", profile);
+      expect(own, profile.key).toContain("Findings, not code (a check, investigation, research, or a report asked for)?");
+      expect(own, profile.key).toContain("~/.bb/thread-storage/<id>/report.md");
+      expect(own, profile.key).toContain('"Where things stand" on top');
+      expect(own, profile.key).toContain("verifiers' reports untruncated");
+      expect(own, profile.key).toContain("each claim checked at its source");
+      expect(own, profile.key).toContain("submit_report, then Done.");
+    }
+  });
+
+  it("shows Patches a report waiting on the owner, in the summary and the detail", () => {
+    const reportTicket: Ticket = {
+      id: "tkt_rep",
+      taskId: "task_1",
+      kind: "report",
+      questions: [],
+      asks: [],
+      answers: null,
+      status: "open",
+      createdAt: 1,
+      closedAt: null,
+      report: { path: "/Users/k/.bb/thread-storage/task_1/report.md", title: "Jev check", summary: null },
+    };
+    expect(dossierSummary([task({ id: "task_1" })], [reportTicket], null)).toContain("report waiting on Kim");
+    expect(dossierSummary([task({ id: "task_1" })], [], null)).not.toContain("report");
+    const detail = taskDetail(task({ id: "task_1" }), { projectName: "P", claims: [], tickets: [reportTicket], children: [] });
+    expect(detail).toContain("open report ticket tkt_rep (waiting on Kim to review): Jev check · /Users/k/.bb/thread-storage/task_1/report.md");
   });
 });
