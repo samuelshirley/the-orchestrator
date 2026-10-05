@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { reportKey } from "./landed";
 import { describe, expect, it } from "vitest";
 import type { Ask } from "./attention";
-import { Store, type SqlDb } from "./store";
+import { MIGRATIONS, Store, type SqlDb } from "./store";
 
 const q = (question: string): Ask => ({ kind: "decision", question, options: ["yes", "no"], recommended: 0 });
 const line = (question: string) => `${question} Options: yes (recommended) / no`;
@@ -400,7 +400,17 @@ describe("browser lease", () => {
   });
 
   describe("model routes", () => {
-    const record = { model: "claude-sonnet-5-5", reason: "sonnet", probability: 0.86, jevModel: "jev-1.13.0", error: null } as const;
+    const record = {
+      model: "claude-sonnet-5-5",
+      reason: "sonnet",
+      probability: 0.86,
+      jevModel: "jev-1.13.0",
+      error: null,
+      effort: "medium",
+      effortReason: "medium",
+      effortProbability: 0.81,
+    } as const;
+    const outcome = { buildFailures: 0, taskFate: null };
 
     it("records one row per thread and reads it back", () => {
       const store = fresh();
@@ -416,9 +426,12 @@ describe("browser lease", () => {
         probability: null,
         jevModel: null,
         error: "no answer in 2000 ms",
+        effort: null,
+        effortReason: "none",
+        effortProbability: null,
       });
       expect(store.modelRoutes()).toEqual([
-        { threadId: "thr_a", taskId: "task_1", projectId: "p", role: "build", routedAt: 10, ...record },
+        { threadId: "thr_a", taskId: "task_1", projectId: "p", role: "build", routedAt: 10, ...record, ...outcome },
         {
           threadId: "thr_b",
           taskId: "task_1",
@@ -430,6 +443,10 @@ describe("browser lease", () => {
           probability: null,
           jevModel: null,
           error: "no answer in 2000 ms",
+          effort: null,
+          effortReason: "none",
+          effortProbability: null,
+          ...outcome,
         },
       ]);
       expect(store.modelRoutes(15).map((row) => row.threadId)).toEqual(["thr_b"]);
@@ -441,6 +458,59 @@ describe("browser lease", () => {
       store.recordModelRoute({ threadId: "thr_a", taskId: "task_1", projectId: "p", role: "task", routedAt: 11, ...record, model: null, reason: "opus" });
       expect(store.modelRoutes()).toHaveLength(1);
       expect(store.modelRoutes()[0]).toMatchObject({ model: null, reason: "opus", routedAt: 11 });
+    });
+
+    it("counts a build failure on the build and its task, and keeps a task's first fate", () => {
+      const store = fresh();
+      store.recordModelRoute({ threadId: "thr_task", taskId: "task_1", projectId: "p", role: "task", routedAt: 10, ...record });
+      store.recordModelRoute({ threadId: "thr_build", taskId: "task_1", projectId: "p", role: "build", routedAt: 11, ...record });
+      store.recordModelRoute({ threadId: "thr_other", taskId: "task_2", projectId: "p", role: "task", routedAt: 12, ...record });
+      store.countRouteBuildFailure(["thr_task", "thr_build"]);
+      // A failure before a builder exists counts on the task only; a thread with no route is skipped.
+      store.countRouteBuildFailure(["thr_task", null, "thr_unrouted"]);
+      store.countRouteBuildFailure(["thr_task", "thr_task"]);
+      store.setRouteTaskFate("task_1", "landed");
+      store.setRouteTaskFate("task_1", "abandoned");
+      const rows = new Map(store.modelRoutes().map((row) => [row.threadId, row] as const));
+      expect(rows.get("thr_task")).toMatchObject({ buildFailures: 3, taskFate: "landed" });
+      expect(rows.get("thr_build")).toMatchObject({ buildFailures: 1, taskFate: "landed" });
+      expect(rows.get("thr_other")).toMatchObject({ buildFailures: 0, taskFate: null });
+      expect(store.taskModelRoutes("task_1").map((row) => row.threadId)).toEqual(["thr_task", "thr_build"]);
+      // A second record (a re-route) keeps the counted outcome.
+      store.recordModelRoute({ threadId: "thr_build", taskId: "task_1", projectId: "p", role: "build", routedAt: 13, ...record });
+      expect(store.taskModelRoutes("task_1")[1]).toMatchObject({ buildFailures: 1, taskFate: "landed" });
+    });
+
+    it("migrates a dossier from before effort routing: old rows read as the default with no outcome yet", () => {
+      const db = new DatabaseSync(":memory:");
+      const added = MIGRATIONS.filter((statement) => statement.startsWith("ALTER TABLE model_routes"));
+      expect(added).toHaveLength(5);
+      const before = MIGRATIONS.slice(0, MIGRATIONS.indexOf(added[0]!));
+      for (const statement of before) db.exec(statement);
+      db.prepare(
+        "INSERT INTO model_routes (thread_id, task_id, project_id, role, routed_at, model, reason, probability, jev_model, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("thr_old", "task_1", "p", "build", 10, "claude-sonnet-5-5", "sonnet", 0.9, "jev-1", null);
+      for (const statement of MIGRATIONS.slice(before.length)) db.exec(statement);
+      const store = new Store(db as unknown as SqlDb, () => 1);
+      expect(store.modelRoutes()).toEqual([
+        {
+          threadId: "thr_old",
+          taskId: "task_1",
+          projectId: "p",
+          role: "build",
+          routedAt: 10,
+          model: "claude-sonnet-5-5",
+          reason: "sonnet",
+          probability: 0.9,
+          jevModel: "jev-1",
+          error: null,
+          effort: null,
+          effortReason: null,
+          effortProbability: null,
+          buildFailures: 0,
+          taskFate: null,
+        },
+      ]);
     });
   });
 });

@@ -82,7 +82,7 @@ import {
   type Visibility,
 } from "./newproject.js";
 import { askJev, downGate } from "./jevwatch.js";
-import { askRoute } from "./modelroute.js";
+import { askRoute, type AskedRole } from "./modelroute.js";
 import { JEV_KEY_PATH, KEY_FILE_MAX_CHARS, jevKey, keyStale, repoEnvPath, type KeyReading, type KeySource } from "./typesafe.js";
 import { LOCAL_CONFIG_LAST_GOOD, LOCAL_CONFIG_MAX_CHARS, LOCAL_CONFIG_PATH, parseLocalConfig } from "./localconfig.js";
 import { githubSlug } from "./profiles.js";
@@ -391,9 +391,9 @@ async function readJevKey(checkout: string | null): Promise<KeyReading> {
   return state;
 }
 
-/** Jev picks an agent's model (modelroute.ts): TypeSafe only, one POST, never the local server or the box. */
-async function modelRouteOnce(state: string, checkout: string | null, signal: AbortSignal) {
-  return askRoute({ key: await readJevKey(checkout), fetch: (url, init) => fetch(url, init), now: () => Date.now() }, state, signal);
+/** Jev picks an agent's model and effort (modelroute.ts): TypeSafe only, one POST, never the local server or the box. */
+async function modelRouteOnce(state: string, checkout: string | null, role: AskedRole, signal: AbortSignal) {
+  return askRoute({ key: await readJevKey(checkout), fetch: (url, init) => fetch(url, init), now: () => Date.now() }, state, role, signal);
 }
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -1751,7 +1751,7 @@ export default experimental_defineHostEntry({
 
     jevAsk: async ({ title, brief }, { signal }) => jevAskOnce(title, brief, signal),
 
-    modelRoute: async ({ state, checkout }, { signal }) => modelRouteOnce(state, checkout, signal),
+    modelRoute: async ({ state, checkout, role }, { signal }) => modelRouteOnce(state, checkout, role, signal),
 
     routeKeyStatus: async ({ checkout }) => {
       const key = await readJevKey(checkout);

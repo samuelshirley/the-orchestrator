@@ -39,7 +39,8 @@ import type { PullRequest } from "./contract";
 import { usageLabel, usageWarning } from "./usage";
 import { SIGN_IN_BUTTON, signInPopup, signInPopupOpen, signedOutItem } from "./signin";
 import { reportDetail, reportLine } from "./jevwatch";
-import { SONNET_THRESHOLD, routeLabel, routeTooltip, routingLine } from "./modelroute";
+import { EFFORT_ROUTING, EFFORT_THRESHOLD, HAIKU_THRESHOLD, SONNET_THRESHOLD, pausedText, routeLabel, routeTooltip, routingLine } from "./modelroute";
+import { outcomeComparison } from "./routeoutcome";
 import { keyProblemText } from "./typesafe";
 import {
   BUILD_CAP,
@@ -537,47 +538,68 @@ function JevWatchLine({ entry }: { entry: BoardState["jevWatch"][number] | undef
 
 type RouteView = BoardState["modelRoutes"][number];
 
-/** How a thread's model was picked (modelroute.ts): "Sonnet · Jev 0.86" or "Default model", the reason in its tooltip. */
+/** How a thread's model and effort were picked (modelroute.ts): "Sonnet · medium · Jev 0.86" or "Default model", the reasons in its tooltip. */
 function RouteMark({ route }: { route: RouteView | undefined }) {
   if (route === undefined) return null;
   return (
     <span
       className="orc-route truncate text-[11px] text-muted-foreground"
-      title={routeTooltip({ reason: route.reason, probability: route.probability, jevModel: route.answeredBy })}
+      title={routeTooltip({
+        reason: route.reason,
+        probability: route.probability,
+        jevModel: route.answeredBy,
+        effortReason: route.effortReason,
+        effortProbability: route.effortProbability,
+      })}
     >
       {routeLabel(route)}
     </span>
   );
 }
 
-/** Jev's model routing for this project: agents on Sonnet in the last 7 days, or why there is none. Hidden while the host cannot say. */
+const clockTime = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/**
+ * Jev's model and effort routing for this project: agents it lowered in the
+ * last 14 days, paused after a failure, or why there is none; then how lowered
+ * agents fared against default ones (routeoutcome.ts). Hidden while the host cannot say.
+ */
 function ModelRoutingLine({
   routes,
   projectId,
   routeKey,
+  pause,
 }: {
   routes: readonly RouteView[];
   projectId: string | null;
   routeKey: BoardState["modelRouteKey"];
+  pause: BoardState["modelRoutePause"];
 }) {
-  const now = useNow(60_000);
+  const now = useNow(30_000);
   if (routeKey === null || projectId === null) return null;
+  const own = routes.filter((route) => route.projectId === projectId);
   // No usable key: the line names the file and what to do (typesafe.ts keyProblemText).
   const line = routeKey.present
-    ? routingLine(
-        routes.filter((route) => route.projectId === projectId),
-        now,
-        routeKey,
-      )
+    ? `${routingLine(own, now, routeKey)}${pausedText(pause, now, clockTime)}`
     : `Jev model routing: off. ${keyProblemText(routeKey.problem, routeKey.file)}`;
+  const effort = EFFORT_ROUTING
+    ? ` For research, Haiku at ${HAIKU_THRESHOLD}. Effort when it is ${EFFORT_THRESHOLD} sure and below the default: low or medium for research, never below medium for a task or build.`
+    : " Effort routing is off.";
+  const paused = pause !== null && now < pause.until ? ` Paused after a failure: ${pause.reason}.` : "";
   const detail = routeKey.present
-    ? `Jev picks Sonnet for a task, research or build agent when it is at least ${SONNET_THRESHOLD} sure; anything else keeps the provider default. Patches always does.`
+    ? `Jev picks Sonnet for a task, research or build agent when it is at least ${SONNET_THRESHOLD} sure.${effort} Anything else keeps the provider default; Patches always does.${paused}`
     : keyProblemText(routeKey.problem, routeKey.file);
+  const comparison = routeKey.present ? outcomeComparison(own, now) : null;
   return (
     <div className="border-b border-border px-3 py-2">
       <p className="text-xs text-muted-foreground" title={detail}>
         {line}
       </p>
+      {comparison === null ? null : (
+        <p className="text-xs text-muted-foreground" title={comparison.detail}>
+          {comparison.line}
+        </p>
+      )}
     </div>
   );
 }
@@ -3416,7 +3438,12 @@ function BoardPage({ subPath }: PluginNavPanelProps) {
           {projectSections ? (
             <>
               <JevWatchLine entry={(state.jevWatch ?? []).find((entry) => entry.projectId === boardProjectId)} />
-              <ModelRoutingLine routes={state.modelRoutes ?? EMPTY} projectId={boardProjectId} routeKey={state.modelRouteKey ?? null} />
+              <ModelRoutingLine
+                routes={state.modelRoutes ?? EMPTY}
+                projectId={boardProjectId}
+                routeKey={state.modelRouteKey ?? null}
+                pause={state.modelRoutePause ?? null}
+              />
               <OtherAgents
                 view={others}
                 savedOpen={otherAgentsOpen}

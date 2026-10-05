@@ -577,30 +577,45 @@ guard changes with its tests: mutation-check them.
 ## Jev (model routing, and watch only)
 
 Jev is a typed-decision model: asked a question with fixed answers, it gives a
-label and a probability for each. It steers one thing, the model of each
-agent; everything else it answers is watched only.
+label and a probability for each. It steers one thing, the model and effort
+of each agent at spawn; everything else it answers is watched only.
 
 ### Model routing
 
 Before The Orchestrator starts a task, research or build thread, it asks
-Jev one question: does this agent need Sonnet or Opus? (`modelroute.ts`)
+Jev two questions in one request: which model does this agent need (sonnet
+or opus; research is also offered haiku, for a pure lookup), and how much
+reasoning effort (low, medium or high)? (`modelroute.ts`)
 
 - **The gate.** Sonnet (`claude-sonnet-5-5`) only when Jev answers sonnet
-  with a probability of 0.7 or more (`SONNET_THRESHOLD`). Opus, a lower
-  probability, no key, a timeout, an error or the back-off all pass no model:
-  the thread starts on the provider default, exactly as before. Jev never
-  gets a model it did not choose.
+  with a probability of 0.7 or more (`SONNET_THRESHOLD`). Haiku
+  (`claude-haiku-4-5-20251001`) only for research, at 0.8 or more
+  (`HAIKU_THRESHOLD`), and then no effort: low is its only level. Opus, a
+  lower probability, no key, a timeout, an error or the back-off all pass no
+  model: the thread starts on the provider default, exactly as before. Jev
+  never gets a model it did not choose.
+- **Effort.** Passed as the spawn's `reasoningLevel` only when Jev's choice
+  is at least 0.7 sure (`EFFORT_THRESHOLD`) and below the default (high):
+  research may get low or medium; a task or build never goes below medium (a
+  low answer becomes medium). High, unsure or an unusable answer passes none.
+  `EFFORT_ROUTING = false` is the off switch: no effort and no Haiku, Sonnet
+  as before.
+- **Spawn only.** Model and effort go on `threads.spawn` and nowhere else: a
+  later message, a retry or a Restart never carries them, because changing
+  either mid-thread throws away the prompt cache.
 - **Who.** Task threads (title and brief), research threads (task title and
   question) and builders (task title and build instructions). Never Patches:
-  her chats keep the provider default. A model the owner picks in the
-  composer always wins, but only one they picked: its source says
-  `explicit`. bb's New task composer sends a model every time (a stored
-  preference says `client-preference`, the default says nothing), and
-  counting those as picks meant no New task ever asked Jev
-  (`ownerPickedModel`). Only on the Claude Code provider.
+  her chats keep the provider default (`spawnModel` checks again). A model
+  or effort the owner picks in the composer always wins, and Jev is not
+  asked, but only one they picked: its source says `explicit`. bb's New task
+  composer sends both every time (a stored preference says
+  `client-preference`, the default says nothing), and counting those as picks
+  meant no New task ever asked Jev (`ownerPickedModel`). Only on the Claude
+  Code provider.
 - **Never in the way.** One request to TypeSafe, capped at 2 s, no retry.
-  After a timeout or an error, nothing is asked for 5 minutes. A failure
-  never stops a spawn.
+  After a timeout or an error, nothing is asked for 5 minutes, and the
+  routing line says "paused after a failure until HH:MM" with the (scrubbed)
+  reason on hover (`routePause`). A failure never stops a spawn.
 - **The key.** `JEV_API_KEY=...` in `~/.config/the-orchestrator/jev.env` when
   that file exists (it alone decides then), else in The Orchestrator repo's
   own `.env`: the main checkout of its land: "main" project, found from that
@@ -618,14 +633,27 @@ Jev one question: does this agent need Sonnet or Opus? (`modelroute.ts`)
   settings, database and other credentialed URLs, signed URLs and phone
   numbers become `<email>`, `<secret>`, `<value>`, `<db-url>`, `<url>` and
   `<phone>`. Then the text is cut to 4,000 characters.
-- **What is kept.** One row per thread (`model_routes`): the model passed or
-  none, the reason, Jev's probability and version. Each task, research and
-  build cell on the board shows "Sonnet · Jev 0.86" or "Default model", with
-  the reason on hover. One line under the board says "Jev model routing: N of
-  M agents Jev routed on Sonnet" for the last 7 days, or "no key". M counts
-  only agents Jev was asked about (it answered, or the call failed); the
-  owner's picks, Patches, other providers, no key and the back-off are left
-  out.
+- **What is kept.** One row per thread (`model_routes`): the model and
+  effort passed or none, their reasons, Jev's probabilities and version. Each
+  task, research and build cell on the board shows "Sonnet · medium · Jev
+  0.86", "Haiku · Jev 0.91", "Default model · medium" or "Default model",
+  with both reasons on hover. One line under the board says "Jev model
+  routing: N of M agents lowered (S Sonnet, H Haiku, E lower effort)" for
+  the last 14 days, or "no key". M counts only agents Jev was asked about (it
+  answered, or the call failed); the owner's picks, Patches, other
+  providers, no key and the back-off are left out.
+- **Outcomes.** So a cutoff that is too low shows within days
+  (`routeoutcome.ts`): a build failed (a failure counted on it) or did its
+  part (landed, closed done, or a later build started); a task landed,
+  closed done or was abandoned, with its build failures and its questions to
+  the owner; research answered or stopped with an error. The row keeps only
+  what the dossier would lose: each build failure, counted on the builder
+  and on its task (`build_failures`), and how the task closed
+  (`task_fate`); the rest is read from children and tickets. Each close logs
+  one line per routed agent with its model and effort. A second line
+  compares the last 14 days: "Lowered: 6 agents, 5 ok, 1 build failure, 0
+  questions · Default: 14 agents, …", finished agents only, by role on
+  hover.
 
 ### Watch only
 
@@ -692,7 +720,8 @@ until the project has a row.
 | `setupwizard.ts` | The setup wizard: when it opens, which folder is allowed, which repos can be ticked, the config file's new text, what a sign-in check means |
 | `newproject.ts` | Add project: slug, name checks, first files, the private `gh repo create`, the visibility check |
 | `worktrees.ts` | Worktree naming, `.worktreeinclude`, cleanup rule, half-removed worktrees, the cleanup sweep |
-| `modelroute.ts` | Jev's model routing: the question, the scrub, the 0.7 gate, who is routed, the board's label and line |
+| `modelroute.ts` | Jev's model and effort routing: the questions, the scrub, the gates (Sonnet 0.7, Haiku 0.8, effort 0.7 with floors), the off switch, who is routed, the back-off, the board's label and line |
+| `routeoutcome.ts` | What each routed agent came to (failed, landed, done, abandoned, errored) and the board's lowered-against-default comparison |
 | `typesafe.ts` | TypeSafe's URL and model, reading `JEV_API_KEY` from `jev.env` or the repo `.env`, refusing a file others can read or a tracked `.env` |
 | `jevwatch.ts` | Jev, watch only: the two questions, reading an answer, the host's bounded ask, the actual outcome, the agreement report |
 | `jev/` | The Jev box: `cli.ts` (up, down, status, dry-run), `policy.ts` (cap, watchdog, Verda bodies, ledger), `box/` (setup, Caddy, watchdog, AnyJev shim) |

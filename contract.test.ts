@@ -247,19 +247,26 @@ describe("the setup wizard's host calls", () => {
 
 describe("Jev model routing", () => {
   const checkout = "/Users/me/Github/the-orchestrator";
-  it("modelRoute takes the state and The Orchestrator's checkout, no key path or URL", () => {
+  it("modelRoute takes the state, the agent's role and The Orchestrator's checkout, no key path or URL", () => {
     const { input } = hostContract.modelRoute;
-    expect(input.safeParse({ state: "Task: x", checkout }).success).toBe(true);
-    expect(input.safeParse({ state: "Task: x", checkout: null }).success).toBe(true);
-    expect(input.safeParse({ state: "Task: x" }).success).toBe(false);
-    expect(input.safeParse({ state: "", checkout }).success).toBe(false);
-    expect(input.safeParse({ state: "x".repeat(4001), checkout }).success).toBe(false);
-    expect(input.safeParse({ state: "x", checkout, baseUrl: "https://evil.example" }).success).toBe(false);
-    expect(input.safeParse({ state: "x", checkout, keyPath: "/etc/passwd" }).success).toBe(false);
+    const role = "build";
+    expect(input.safeParse({ state: "Task: x", checkout, role }).success).toBe(true);
+    expect(input.safeParse({ state: "Task: x", checkout: null, role: "research" }).success).toBe(true);
+    expect(input.safeParse({ state: "Task: x", checkout }).success).toBe(false);
+    // Patches is never asked about.
+    expect(input.safeParse({ state: "Task: x", checkout, role: "patches" }).success).toBe(false);
+    expect(input.safeParse({ state: "Task: x", role }).success).toBe(false);
+    expect(input.safeParse({ state: "", checkout, role }).success).toBe(false);
+    expect(input.safeParse({ state: "x".repeat(4001), checkout, role }).success).toBe(false);
+    expect(input.safeParse({ state: "x", checkout, role, baseUrl: "https://evil.example" }).success).toBe(false);
+    expect(input.safeParse({ state: "x", checkout, role, keyPath: "/etc/passwd" }).success).toBe(false);
   });
   it("modelRoute returns an answer or a typed failure, never the key", () => {
     const { output } = hostContract.modelRoute;
-    expect(output.safeParse({ ok: true, latencyMs: 3, model: "jev-1.13.0", answer: { choice: "sonnet", top: 0.8, margin: 0.6 } }).success).toBe(true);
+    const answer = { choice: "sonnet", top: 0.8, margin: 0.6 };
+    expect(output.safeParse({ ok: true, latencyMs: 3, model: "jev-1.13.0", answer, effort: { choice: "medium", top: 0.9, margin: 0.8 } }).success).toBe(true);
+    expect(output.safeParse({ ok: true, latencyMs: 3, model: "jev-1.13.0", answer, effort: { error: "not asked" } }).success).toBe(true);
+    expect(output.safeParse({ ok: true, latencyMs: 3, model: "jev-1.13.0", answer }).success).toBe(false);
     expect(output.safeParse({ ok: false, kind: "no-key", problem: "open" }).success).toBe(true);
     expect(output.safeParse({ ok: false, kind: "no-key", problem: "tracked" }).success).toBe(true);
     expect(output.safeParse({ ok: false, kind: "timeout", error: "slow", latencyMs: 2000 }).success).toBe(true);

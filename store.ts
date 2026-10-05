@@ -6,6 +6,7 @@
 import { askLine, type Ask } from "./attention";
 import { actualOutcome, type JevAskRecord, type JevWatchRow, type OutcomeFacts } from "./jevwatch";
 import type { RouteRecord } from "./modelroute";
+import { TASK_FATES, type TaskFate } from "./routeoutcome";
 import { reportKey } from "./landed";
 import type { Claim } from "./claims";
 import type { ReportRef } from "./report";
@@ -140,6 +141,12 @@ export const MIGRATIONS: readonly string[] = [
   `ALTER TABLE tickets ADD COLUMN report_path TEXT`,
   `ALTER TABLE tickets ADD COLUMN report_title TEXT`,
   `ALTER TABLE tickets ADD COLUMN report_summary TEXT`,
+  // Jev's effort beside its model, and what the agent came to (routeoutcome.ts).
+  `ALTER TABLE model_routes ADD COLUMN effort TEXT`,
+  `ALTER TABLE model_routes ADD COLUMN effort_reason TEXT`,
+  `ALTER TABLE model_routes ADD COLUMN effort_probability REAL`,
+  `ALTER TABLE model_routes ADD COLUMN build_failures INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE model_routes ADD COLUMN task_fate TEXT`,
 ];
 
 export interface ModelRoute {
@@ -153,6 +160,15 @@ export interface ModelRoute {
   probability: number | null;
   jevModel: string | null;
   error: string | null;
+  /** The effort passed to spawn; null: the provider default. */
+  effort: string | null;
+  /** Why (modelroute.ts EffortReason); null on rows from before effort routing. */
+  effortReason: string | null;
+  effortProbability: number | null;
+  /** Build failures counted on this agent: a build's own, a task's every one. */
+  buildFailures: number;
+  /** How the agent's task closed; null while it is open. */
+  taskFate: TaskFate | null;
 }
 
 export type Stage = "research" | "build" | "pr" | "you" | "done";
@@ -280,6 +296,27 @@ export interface ProjectPrefs {
 }
 
 type Row = Record<string, unknown>;
+
+function toModelRoute(row: Row): ModelRoute {
+  const fate = str(row.task_fate);
+  return {
+    threadId: String(row.thread_id),
+    taskId: String(row.task_id),
+    projectId: String(row.project_id),
+    role: String(row.role),
+    routedAt: num(row.routed_at) ?? 0,
+    model: str(row.model),
+    reason: String(row.reason),
+    probability: num(row.probability),
+    jevModel: str(row.jev_model),
+    error: str(row.error),
+    effort: str(row.effort),
+    effortReason: str(row.effort_reason),
+    effortProbability: num(row.effort_probability),
+    buildFailures: num(row.build_failures) ?? 0,
+    taskFate: TASK_FATES.find((known) => known === fate) ?? null,
+  };
+}
 
 const str = (value: unknown): string | null => (typeof value === "string" ? value : null);
 const num = (value: unknown): number | null =>
@@ -850,12 +887,44 @@ export class Store {
   recordModelRoute(row: { threadId: string; taskId: string; projectId: string; role: string; routedAt: number } & RouteRecord) {
     this.db
       .prepare(
-        `INSERT INTO model_routes (thread_id, task_id, project_id, role, routed_at, model, reason, probability, jev_model, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO model_routes (thread_id, task_id, project_id, role, routed_at, model, reason, probability, jev_model, error,
+           effort, effort_reason, effort_probability)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (thread_id) DO UPDATE SET routed_at = excluded.routed_at, model = excluded.model, reason = excluded.reason,
-           probability = excluded.probability, jev_model = excluded.jev_model, error = excluded.error`,
+           probability = excluded.probability, jev_model = excluded.jev_model, error = excluded.error,
+           effort = excluded.effort, effort_reason = excluded.effort_reason, effort_probability = excluded.effort_probability`,
       )
-      .run(row.threadId, row.taskId, row.projectId, row.role, row.routedAt, row.model, row.reason, row.probability, row.jevModel, row.error);
+      .run(
+        row.threadId,
+        row.taskId,
+        row.projectId,
+        row.role,
+        row.routedAt,
+        row.model,
+        row.reason,
+        row.probability,
+        row.jevModel,
+        row.error,
+        row.effort,
+        row.effortReason,
+        row.effortProbability,
+      );
+  }
+
+  /** One build failure, counted on the build that failed (if any) and on its task's thread. Threads with no route are skipped. */
+  countRouteBuildFailure(threadIds: readonly (string | null)[]) {
+    const update = this.db.prepare("UPDATE model_routes SET build_failures = build_failures + 1 WHERE thread_id = ?");
+    for (const threadId of new Set(threadIds)) if (threadId !== null) update.run(threadId);
+  }
+
+  /** How a task closed, on every route of it; the first close is kept. */
+  setRouteTaskFate(taskId: string, fate: TaskFate) {
+    this.db.prepare("UPDATE model_routes SET task_fate = ? WHERE task_id = ? AND task_fate IS NULL").run(fate, taskId);
+  }
+
+  /** The routes of one task's agents, oldest first. */
+  taskModelRoutes(taskId: string): ModelRoute[] {
+    return (this.db.prepare("SELECT * FROM model_routes WHERE task_id = ? ORDER BY routed_at").all(taskId) as Row[]).map(toModelRoute);
   }
 
   /** Every recorded route, or those since `since`; newest last. */
@@ -865,18 +934,7 @@ export class Store {
         ? this.db.prepare("SELECT * FROM model_routes ORDER BY routed_at").all()
         : this.db.prepare("SELECT * FROM model_routes WHERE routed_at >= ? ORDER BY routed_at").all(since)
     ) as Row[];
-    return rows.map((row) => ({
-      threadId: String(row.thread_id),
-      taskId: String(row.task_id),
-      projectId: String(row.project_id),
-      role: String(row.role),
-      routedAt: num(row.routed_at) ?? 0,
-      model: str(row.model),
-      reason: String(row.reason),
-      probability: num(row.probability),
-      jevModel: str(row.jev_model),
-      error: str(row.error),
-    }));
+    return rows.map(toModelRoute);
   }
 
   // -------------------------------------------------------------- children

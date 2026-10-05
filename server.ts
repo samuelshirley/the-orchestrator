@@ -228,6 +228,7 @@ import {
   routeBackoff,
   routeDecision,
   routeFailed,
+  routePause,
   routeSkip,
   routeState,
   skippedRoute,
@@ -235,6 +236,7 @@ import {
   type RouteRecord,
   type RouteRole,
 } from "./modelroute.js";
+import { ERROR_SUMMARY_PREFIX, outcomeLogLine, routeOutcomes, staleFate, type TaskFate } from "./routeoutcome.js";
 import { deriveTestList, howToOpenGap, validatePr } from "./validation.js";
 import { flag, text as textArg } from "./toolargs.js";
 import {
@@ -460,19 +462,31 @@ export const boardStateSchema = z.object({
   ui: z.object({ otherAgentsOpen: z.boolean().nullable() }),
   /** Jev's watch-only agreement per project (jevwatch.ts); a project with no rows is absent. */
   jevWatch: z.array(z.object({ projectId: z.string(), report: jevReportSchema })),
-  /** How each agent's model was picked (modelroute.ts): the last 7 days and every open task's threads. */
+  /** How each agent's model and effort were picked (modelroute.ts): the last 14 days and every open task's threads. */
   modelRoutes: z.array(
     z.object({
       threadId: z.string(),
       projectId: z.string(),
+      role: z.string(),
       routedAt: z.number(),
       model: z.string().nullable(),
       reason: z.string(),
       probability: z.number().nullable(),
       /** The Jev version that answered. */
       answeredBy: z.string().nullable(),
+      effort: z.string().nullable(),
+      effortReason: z.string().nullable(),
+      effortProbability: z.number().nullable(),
+      /** What the agent came to (routeoutcome.ts); "open" while it has not. */
+      outcome: z.object({
+        kind: z.enum(["landed", "ok", "failed", "abandoned", "errored", "open"]),
+        buildFailures: z.number(),
+        questions: z.number(),
+      }),
     }),
   ),
+  /** Jev's back-off after a failed route (modelroute.ts routePause): when it ends and why; null when it does not hold. */
+  modelRoutePause: z.object({ until: z.number(), reason: z.string() }).nullable(),
   /** Whether the host has a usable TypeSafe key, and the file it is in or about (presence and a path only, typesafe.ts jevKey); null when it cannot say. */
   modelRouteKey: z
     .union([
@@ -1249,7 +1263,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   function closeStale(taskId: string, reason: string) {
-    closeTask(taskId, reason);
+    closeTask(taskId, reason, staleFate(reason));
     store.setMeta(closeHeldKey(taskId), null);
     void cleanupWorktree(taskId);
     publish();
@@ -1284,10 +1298,31 @@ export default async function plugin(bb: BbPluginApi) {
     return record;
   }
 
-  /** Every close goes through here: a closed task leaves no steps row. */
-  function closeTask(taskId: string, note: string) {
+  /** Every close goes through here: a closed task leaves no steps row, and its routed agents' outcomes are kept. */
+  function closeTask(taskId: string, note: string, fate: TaskFate) {
     store.closeTask(taskId, note);
     store.setMeta(stepsKey(taskId), null);
+    noteOutcomes(taskId, fate);
+  }
+
+  /** How the task closed, on its routes, and one log line per routed agent next to its route. Bookkeeping: never fails a close. */
+  function noteOutcomes(taskId: string, fate: TaskFate) {
+    try {
+      store.setRouteTaskFate(taskId, fate);
+      const routes = store.taskModelRoutes(taskId);
+      if (routes.length === 0) return;
+      const outcomes = routeOutcomes(
+        routes,
+        store.children().filter((child) => child.taskId === taskId),
+        store.tickets({ status: "all" }).filter((ticket) => ticket.taskId === taskId),
+      );
+      for (const route of routes) {
+        const outcome = outcomes.get(route.threadId);
+        if (outcome !== undefined) bb.log.info(`${taskId}: outcome: ${outcomeLogLine(route, outcome)}`);
+      }
+    } catch (error) {
+      bb.log.warn(`${taskId}: recording route outcomes failed: ${describeError(error)}`);
+    }
   }
 
   /**
@@ -1403,7 +1438,7 @@ export default async function plugin(bb: BbPluginApi) {
         // Read before closing, which drops it. The whole last report: task.note
         // keeps only its last line. It only feeds the follow-up below.
         const report = store.getMeta(reportKey(task.id)) ?? task.note;
-        closeTask(task.id, note);
+        closeTask(task.id, note, "landed");
         store.setMeta(closeHeldKey(task.id), null);
         bb.log.info(`${task.id} closed: ${note}`);
         void cleanupWorktree(task.id);
@@ -1499,7 +1534,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         doneKept.delete(task.id);
         const note = doneNote(args.report);
-        closeTask(task.id, note);
+        closeTask(task.id, note, "done");
         store.setMeta(idleKey(task.id), null);
         bb.log.info(`${task.id} closed: ${note}`);
         void cleanupWorktree(task.id);
@@ -2100,14 +2135,46 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** When the last model route failed: no ask for the back-off after it (modelroute.ts routeBackoff). */
-  let routeFailedAt: number | null = null;
+  /** The board's routes: the last 14 days and every open task's threads, each with its outcome (routeoutcome.ts). */
+  function boardRoutes(open: readonly Task[]): BoardState["modelRoutes"] {
+    const now = Date.now();
+    const openIds = new Set(open.map((task) => task.id));
+    const routes = store
+      .modelRoutes()
+      .filter((route) => now - route.routedAt < ROUTE_WINDOW_MS || openIds.has(route.taskId))
+      .slice(-2000);
+    const taskIds = new Set(routes.map((route) => route.taskId));
+    const outcomes = routeOutcomes(
+      routes,
+      store.children().filter((child) => taskIds.has(child.taskId)),
+      store.tickets({ status: "all" }).filter((ticket) => taskIds.has(ticket.taskId)),
+    );
+    return routes.map((route) => ({
+      threadId: route.threadId,
+      projectId: route.projectId,
+      role: route.role,
+      routedAt: route.routedAt,
+      model: route.model,
+      reason: route.reason,
+      probability: route.probability,
+      answeredBy: route.jevModel,
+      effort: route.effort,
+      effortReason: route.effortReason,
+      effortProbability: route.effortProbability,
+      outcome: outcomes.get(route.threadId) ?? { kind: "open", buildFailures: route.buildFailures, questions: 0 },
+    }));
+  }
+
+  /** When the last model route failed, and why: no ask for the back-off after it (modelroute.ts routeBackoff, routePause). */
+  let routeFailure: { at: number; error: string | null } | null = null;
 
   /**
-   * The model for one agent's spawn (modelroute.ts): Sonnet only when Jev is
-   * confident, else no model, today's provider default. Never Patches, never
-   * over the owner's own pick. Bounded by the host's 2 s; any failure is no
-   * model, so a spawn never fails on it.
+   * The model and effort for one agent's spawn (modelroute.ts): Sonnet, Haiku
+   * or a lower effort only when Jev is confident, else none, today's provider
+   * default. Never Patches, never over the owner's own pick. Bounded by the
+   * host's 2 s; any failure is no model and no effort, so a spawn never fails
+   * on it. Spawn only: nothing that messages, retries or restarts an existing
+   * thread passes a model or effort.
    */
   async function routeFor(input: {
     role: RouteRole;
@@ -2118,18 +2185,20 @@ export default async function plugin(bb: BbPluginApi) {
   }): Promise<RouteRecord> {
     const skip = routeSkip({ role: input.role, ownerModel: input.ownerModel ?? false, providerId: input.providerId });
     if (skip !== null) return skippedRoute(skip);
+    const role = input.role;
+    if (role === "patches") return skippedRoute("patches");
     const started = Date.now();
-    if (routeBackoff(started, routeFailedAt)) return skippedRoute("backoff");
+    if (routeBackoff(started, routeFailure?.at ?? null)) return skippedRoute("backoff");
     if (input.hostId === null) return skippedRoute("error", "no host");
     let record: RouteRecord;
     try {
       const checkout = await orchestratorCheckout(input.hostId);
-      const reply = await host.call("modelRoute", { state: input.state(), checkout }, { hostId: input.hostId, timeoutMs: ROUTE_TIMEOUT_MS + 500 });
-      record = routeDecision(reply);
+      const reply = await host.call("modelRoute", { state: input.state(), checkout, role }, { hostId: input.hostId, timeoutMs: ROUTE_TIMEOUT_MS + 500 });
+      record = routeDecision(reply, role);
     } catch (error) {
       record = skippedRoute("error", `host: ${describeError(error)}`);
     }
-    if (routeFailed(record)) routeFailedAt = started;
+    if (routeFailed(record)) routeFailure = { at: started, error: record.error };
     return record;
   }
 
@@ -2138,7 +2207,10 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       store.recordModelRoute({ threadId, taskId: task.id, projectId: task.projectId, role, routedAt: Date.now(), ...record });
       const p = record.probability === null ? "" : ` p=${record.probability.toFixed(2)}`;
-      bb.log.info(`${task.id}: ${role} ${threadId} on ${record.model ?? "the provider default"} (${record.reason}${p}).`);
+      const ep = record.effortProbability === null ? "" : ` p=${record.effortProbability.toFixed(2)}`;
+      bb.log.info(
+        `${task.id}: ${role} ${threadId} on ${record.model ?? "the provider default"} (${record.reason}${p}), effort ${record.effort ?? "default"} (${record.effortReason}${ep}).`,
+      );
     } catch (error) {
       bb.log.warn(`${task.id}: recording the model route failed: ${describeError(error)}`);
     }
@@ -2401,6 +2473,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function failBuildFor(taskId: string, reason: string, keepWorktree: boolean, requestedBy: string | null) {
     const current = store.task(taskId);
     if (current === null) return;
+    countBuildFailure(current);
     const saved = store.transaction(() => {
       store.releaseClaims(taskId);
       return store.updateTask(taskId, {
@@ -2425,6 +2498,26 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (error) {
         bb.log.warn(`could not report build failure to ${threadId}: ${describeError(error)}`);
       }
+    }
+  }
+
+  /**
+   * One failure on the routes it belongs to (routeoutcome.ts): the task's,
+   * and its latest builder's unless a new build is still being prepared (a
+   * failure then is that build's, which has no thread yet).
+   */
+  function countBuildFailure(task: Task) {
+    try {
+      const builder =
+        task.buildState === "preparing"
+          ? null
+          : (store
+              .children()
+              .filter((child) => child.taskId === task.id && child.kind === "build")
+              .pop()?.threadId ?? null);
+      store.countRouteBuildFailure([task.threadId, builder]);
+    } catch (error) {
+      bb.log.warn(`${task.id}: counting the build failure on its routes failed: ${describeError(error)}`);
     }
   }
 
@@ -2854,7 +2947,7 @@ export default async function plugin(bb: BbPluginApi) {
         let held: string | null = null;
         if (!reloads && !keep) {
           const hold = closeHoldFor(task.id);
-          if (hold === null) closeTask(task.id, reloadedNote(pending));
+          if (hold === null) closeTask(task.id, reloadedNote(pending), "landed");
           else {
             holdClose(task, hold, reloadedNote(pending));
             held = heldCloseMessage(task.id, hold, "Landed.");
@@ -3067,7 +3160,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (pending.threadId !== null) await tellHeld({ ...current, threadId: pending.threadId }, hold, `Reloaded: ${pending.sha.slice(0, 7)} is live.`);
       return;
     }
-    closeTask(pending.taskId, note);
+    closeTask(pending.taskId, note, "landed");
     bb.log.info(`${pending.taskId} closed: ${note}`);
     publish();
     if (pending.threadId !== null) {
@@ -3268,6 +3361,8 @@ export default async function plugin(bb: BbPluginApi) {
       const paths = store.releaseTask(task.id, { reason, by: "patches", close });
       if (close) {
         store.setMeta(stepsKey(task.id), null);
+        // Closed by Patches, not by a land the dossier saw: given up, for the outcome comparison.
+        noteOutcomes(task.id, "abandoned");
         void cleanupWorktree(task.id);
       }
       changed(store.task(task.id) ?? task);
@@ -3421,7 +3516,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   function threadFailed(thread: { id: string }, error: string | null) {
-    const reason = `Stopped with an error: ${(error ?? "no message").split("\n")[0]?.slice(0, 240)}`;
+    const reason = `${ERROR_SUMMARY_PREFIX} ${(error ?? "no message").split("\n")[0]?.slice(0, 240)}`;
     const task = store.taskByThread(thread.id);
     if (task !== null && task.closedAt === null) {
       changed(store.updateTask(task.id, { note: reason }));
@@ -3456,7 +3551,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const task = store.taskByThread(thread.id);
     if (task === null || task.closedAt !== null) return;
-    closeTask(task.id, "Task thread archived.");
+    closeTask(task.id, "Task thread archived.", "abandoned");
     publish();
     void cleanupWorktree(task.id);
   });
@@ -4121,7 +4216,7 @@ export default async function plugin(bb: BbPluginApi) {
               for (const orphan of store.tasks({ includeClosed: false })) {
                 if (before.has(orphan.id) || orphan.projectId !== action.projectId) continue;
                 if (orphan.prNumber !== action.prNumber || orphan.threadId !== null) continue;
-                closeTask(orphan.id, `Could not start its thread: ${describeError(error)}`);
+                closeTask(orphan.id, `Could not start its thread: ${describeError(error)}`, "abandoned");
               }
               throw error;
             } finally {
@@ -4600,7 +4695,7 @@ export default async function plugin(bb: BbPluginApi) {
         return { taskId: task.id, threadId: thread.id };
       } catch (error) {
         // No open task without a thread: it would hold a place on the board forever.
-        closeTask(task.id, `Could not start its thread: ${describeError(error)}`);
+        closeTask(task.id, `Could not start its thread: ${describeError(error)}`, "abandoned");
         publish();
         throw error;
       }
@@ -4684,19 +4779,8 @@ export default async function plugin(bb: BbPluginApi) {
         jevWatch: own
           .map((project) => ({ projectId: project.id, report: agreementReport(store.listJevWatch(project.id)) }))
           .filter((entry) => entry.report.rows > 0),
-        modelRoutes: store
-          .modelRoutes()
-          .filter((route) => Date.now() - route.routedAt < ROUTE_WINDOW_MS || tasks.some((task) => task.id === route.taskId))
-          .slice(-2000)
-          .map((route) => ({
-            threadId: route.threadId,
-            projectId: route.projectId,
-            routedAt: route.routedAt,
-            model: route.model,
-            reason: route.reason,
-            probability: route.probability,
-            answeredBy: route.jevModel,
-          })),
+        modelRoutes: boardRoutes(tasks),
+        modelRoutePause: routePause(Date.now(), routeFailure),
         modelRouteKey: await routeKey(primaryHostId),
         signedOut: signedOutView(signInRecords()),
         ownerName: owner(),
@@ -4953,7 +5037,7 @@ export default async function plugin(bb: BbPluginApi) {
       // Open questions still hold the task (tickets.ts): it closes once they are answered.
       const closes = task !== null && task.closedAt === null && closeHoldFor(task.id) === null;
       if (task !== null && closes) {
-        closeTask(task.id, reportReviewedNote());
+        closeTask(task.id, reportReviewedNote(), "done");
         store.setMeta(idleKey(task.id), null);
         store.setMeta(closeHeldKey(task.id), null);
         bb.log.info(`${task.id} closed: ${reportReviewedNote()}`);
@@ -5010,7 +5094,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (task === null) throw new Error(`No task ${id}.`);
       if (task.threadId !== null && chatOf(task.threadId) !== null) throw new Error("That is a Patches chat, not a task.");
       if (task.closedAt === null) {
-        closeTask(task.id, `Deleted by ${owner()}.`);
+        closeTask(task.id, `Deleted by ${owner()}.`, "abandoned");
         publish();
       }
       store.setMeta(idleKey(task.id), null);

@@ -127,17 +127,21 @@ what must not break.
 - Whatever Claude Code sends reaches Anthropic byte-identical: no proxy,
   relay or `ANTHROPIC_BASE_URL` sits in front of agents and nothing rewrites
   their requests or tool output. Anything like it needs the owner's go.
-- Jev steers one thing: the model of task, research and build agents
-  (`modelroute.ts`), through TypeSafe with `JEV_API_KEY` from
+- Jev steers one thing: the model and effort of task, research and build
+  agents, at spawn only (`modelroute.ts`), through TypeSafe with `JEV_API_KEY` from
   `~/.config/the-orchestrator/jev.env` if that file exists, else The
   Orchestrator repo's own `.env` (its land: "main" project's main checkout,
   never a worktree's; `typesafe.ts` jevKey). Only host.ts reads them; a file
   others can read is refused (the board names it: `chmod 600 <path>`), and
   so is a repo `.env` git tracks. Sonnet only when Jev says sonnet at
-  0.7 or more; anything else, or any failure, passes no model (the provider
-  default). Patches never; the owner's composer pick wins, but only one
-  whose source says `explicit` (bb's composer always sends a model). The
-  board's "N of M" counts only agents Jev was asked about. What is sent is
+  0.7 or more; Haiku only for a research lookup at 0.8; effort only at 0.7
+  and below the default (research low or medium, task and build never below
+  medium); anything else, or any failure, passes neither (the provider
+  default). `EFFORT_ROUTING = false` turns effort and Haiku off. Patches
+  never; the owner's composer model or effort wins, but only one whose source
+  says `explicit` (bb's composer always sends both). The board counts only
+  agents Jev was asked about, compares how lowered and default agents fared
+  over 14 days (`routeoutcome.ts`) and shows the back-off. What is sent is
   scrubbed first. Its kind/tier questions stay watch-only (`jevwatch.ts`):
   asked in the background with a 2 s cap, logged next to what happened, never
   change behaviour. The box is paused in this repo: nothing installed, nothing

@@ -398,7 +398,8 @@ export const hostContract = defineRpcContract({
     ]),
   },
   /**
-   * Jev picks an agent's model (modelroute.ts): TypeSafe only, with the key
+   * Jev picks an agent's model and effort (modelroute.ts; `role` decides
+   * whether Haiku is offered): TypeSafe only, with the key
    * from ~/.config/the-orchestrator/jev.env, else `.env` in `checkout` (The
    * Orchestrator's main checkout; typesafe.ts jevKey), "no-key" with no call
    * when there is none, the file is open to others or git tracks it. One POST capped
@@ -407,9 +408,11 @@ export const hostContract = defineRpcContract({
    * from the server (modelroute.ts routeState).
    */
   modelRoute: {
-    input: z.object({ state: z.string().min(1).max(4000), checkout: path.nullable() }).strict(),
+    input: z.object({ state: z.string().min(1).max(4000), checkout: path.nullable(), role: z.enum(["task", "research", "build"]) }).strict(),
     output: z.union([
-      z.object({ ok: z.literal(true), latencyMs: z.number().int().min(0), model: text(80).nullable(), answer: jevAnswerSchema }).strict(),
+      z
+        .object({ ok: z.literal(true), latencyMs: z.number().int().min(0), model: text(80).nullable(), answer: jevAnswerSchema, effort: jevAnswerSchema })
+        .strict(),
       z.object({ ok: z.literal(false), kind: z.literal("no-key"), problem: keyProblemSchema }).strict(),
       z
         .object({ ok: z.literal(false), kind: z.enum(["error", "timeout"]), error: text(300), latencyMs: z.number().int().min(0) })
