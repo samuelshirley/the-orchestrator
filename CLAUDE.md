@@ -124,11 +124,9 @@ what must not break.
   at most 3 tabs of its own, released when its pass ends. Builders: no browser.
 - `memwatch.sh` is the backstop outside bb: it kills the largest process in
   bb's tree before the Mac runs out, and logs to `.memwatch/`.
-- Headroom was removed on 5 Oct 2026: it altered Claude Code's request bytes
-  and agents' tool output, and jammed a chat with a leftover tool_reference.
-  The rule stands: whatever Claude Code sends reaches Anthropic byte-identical,
-  so no proxy rewrites it, and anything like it later needs Sam's go.
-  `legacyroute.ts` only cleans up after it (docs/how-it-works.md "Removed").
+- Whatever Claude Code sends reaches Anthropic byte-identical: no proxy,
+  relay or `ANTHROPIC_BASE_URL` sits in front of agents and nothing rewrites
+  their requests or tool output. Anything like it needs the owner's go.
 - Jev steers one thing: the model of task, research and build agents
   (`modelroute.ts`), through TypeSafe with `JEV_API_KEY` from
   `~/.config/the-orchestrator/jev.env` if that file exists, else The

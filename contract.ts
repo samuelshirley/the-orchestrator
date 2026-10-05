@@ -204,20 +204,6 @@ const killTargetSchema = z.discriminatedUnion("kind", [
 /** Why there is no Jev key (typesafe.ts KeyProblem). */
 const keyProblemSchema = z.enum(["missing", "open", "tracked"]);
 
-/** One beat of the removed proxy's one-time retirement (legacyroute.ts retirePlan). */
-const retireLegacyOutputSchema = z
-  .object({
-    /** Nothing of it runs and its install dir is gone: the server stops asking. */
-    done: z.boolean(),
-    /** Why something stays this beat, or null. */
-    waits: text(400).nullable(),
-    /** What this beat stopped (TERM, then KILL) and removed. */
-    stopped: z.array(z.object({ what: z.enum(["proxy", "relay"]), pid: z.number().int().gt(1) }).strict()).max(2),
-    removed: path.nullable(),
-  })
-  .strict();
-export type RetireLegacyOutput = z.infer<typeof retireLegacyOutputSchema>;
-
 export const hostContract = defineRpcContract({
   /**
    * The AI-service methods core calls for the `local` service server.ts
@@ -710,15 +696,5 @@ export const hostContract = defineRpcContract({
         .strict(),
       z.object({ ok: z.literal(false), reason: text(500) }).strict(),
     ]),
-  },
-  /**
-   * The removed proxy's one-time retirement, one liveness beat at a time
-   * (legacyroute.ts retirePlan): its proxy stopped, its relay stopped once no
-   * agent turn runs, both only by a pid whose command line is theirs, then
-   * its install dir removed, that exact path only. Idempotent.
-   */
-  retireLegacyRoute: {
-    input: z.object({ activeAgentTurns: z.number().int().min(0).max(1000) }).strict(),
-    output: retireLegacyOutputSchema,
   },
 });

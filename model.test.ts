@@ -650,14 +650,14 @@ describe("completionOf", () => {
   });
 });
 
-// task "Critical validation of jev and headroom", 2026-10-04: findings in chat only, nothing to review.
+// task "Critical validation of Jev", 2026-10-04: findings in chat only, nothing to review.
 describe("a report waiting on the owner", () => {
   const report = (overrides: Partial<Ticket> = {}) =>
     ticket({
       id: "tkt_rep",
       kind: "report",
       questions: [],
-      report: { path: "/Users/a/.bb/thread-storage/task_1/report.md", title: "Jev check", summary: "Jev routes.\nHeadroom is gone." },
+      report: { path: "/Users/a/.bb/thread-storage/task_1/report.md", title: "Jev check", summary: "Jev routes.\nRouting holds." },
       ...overrides,
     });
 
@@ -670,7 +670,7 @@ describe("a report waiting on the owner", () => {
       summary: "Review report: Jev check",
       tone: "success",
       questionTicketId: null,
-      report: { ticketId: "tkt_rep", title: "Jev check", summary: "Jev routes.\nHeadroom is gone.", path: "/Users/a/.bb/thread-storage/task_1/report.md" },
+      report: { ticketId: "tkt_rep", title: "Jev check", summary: "Jev routes.\nRouting holds.", path: "/Users/a/.bb/thread-storage/task_1/report.md" },
     });
   });
 

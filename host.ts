@@ -29,8 +29,6 @@
 // (setupwizard.ts): setupFacts and listRepos only read; saveSetup is the one
 // write to ~/.config/the-orchestrator/config.json, the folder and the name
 // merged into the file as it is, never over a file that has a problem.
-// retireLegacyRoute stops the removed token proxy's leftover processes by
-// verified pid and then removes its install dir, that path only (legacyroute.ts).
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { constants as fsConstants, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -66,24 +64,10 @@ import {
   type RepoSnapshot,
   type AiVoiceTranscribeInput,
   type AiVoiceTranscribeOutput,
-  type RetireLegacyOutput,
 } from "./contract.js";
 import { SIGN_IN_ARGS, SIGN_IN_TIMEOUT_MS, signInPathDirs, signInSpawnError } from "./signin.js";
 import { killAgentProcess, readMemory } from "./memory-probe.js";
 import { builderSettings, envPatternsOf, guardHookCommand } from "./builderguard.js";
-import {
-  LEGACY_PROXY_URL,
-  LEGACY_RELAY_HEALTH_PATH,
-  LEGACY_RELAY_URL,
-  isLegacyProxy,
-  isLegacyRelay,
-  legacyPaths,
-  parseLegacyProxyHealth,
-  parseLegacyRelayHealth,
-  removableDir,
-  retirePlan,
-  withoutLegacyRoute,
-} from "./legacyroute.js";
 import {
   GH_LOGIN_ARGS,
   SLUG_PATTERN,
@@ -182,11 +166,6 @@ async function writeBuilderGuard(
   } catch {
     // None yet, or not JSON (Claude Code couldn't read it either): start fresh.
   }
-  // A reused worktree may still carry the removed proxy's base URL: it goes
-  // (legacyroute.ts withoutLegacyRoute).
-  if (typeof existing === "object" && existing !== null && !Array.isArray(existing)) {
-    existing = withoutLegacyRoute(existing as Record<string, unknown>) ?? existing;
-  }
   const settings = builderSettings(existing, {
     hookCommand: guardHookCommand(root, worktreePath),
     repoPath,
@@ -195,115 +174,6 @@ async function writeBuilderGuard(
   });
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(settings, null, 2)}\n`);
-}
-
-// ------------------------------------------------- the removed proxy's leftovers
-// legacyroute.ts holds the policy (retirePlan); here the IO, one liveness beat
-// at a time until it says done: read both health endpoints with short
-// timeouts, confirm each pid with ps, stop by verified pid only (TERM, then
-// KILL), and remove the install dir once both are confirmed gone. Starts
-// nothing and writes nothing.
-
-const legacy = legacyPaths(homedir());
-
-async function localGet(url: string, timeoutMs: number, signal: AbortSignal): Promise<{ status: number; body: unknown } | null> {
-  try {
-    const response = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]), redirect: "error" });
-    const text = (await response.text()).slice(0, 100_000);
-    let body: unknown = null;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      body = null;
-    }
-    return { status: response.status, body };
-  } catch {
-    return null;
-  }
-}
-
-/** pgid and command of a live pid, or null. */
-async function processFacts(pid: number, signal: AbortSignal): Promise<{ pgid: number; command: string } | null> {
-  const out = await new Promise<string | null>((done) =>
-    execFile("/bin/ps", ["-o", "pgid=,command=", "-p", String(pid)], { signal, timeout: 5_000 }, (error, stdout) => done(error ? null : stdout)),
-  );
-  const match = out === null ? null : /^\s*(\d+)\s+(.+?)\s*$/m.exec(out);
-  return match === null ? null : { pgid: Number(match[1]), command: match[2]! };
-}
-
-/** The pid one of them runs as: the one its health names, else its pid file's, only while ps shows its command line. */
-async function verifiedPid(named: number | null, pidFile: string, ours: (command: string) => boolean, signal: AbortSignal): Promise<number | null> {
-  const fromFile = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
-  for (const pid of [named, Number.isInteger(fromFile) && fromFile > 1 ? fromFile : null]) {
-    if (pid === null) continue;
-    const facts = await processFacts(pid, signal);
-    if (facts !== null && ours(facts.command)) return pid;
-  }
-  return null;
-}
-
-/**
- * Stop one of them: its own group when it leads one (both were started
- * detached), TERM, then KILL after `graceMs`. Only while ps shows its command
- * line, checked again right before each signal.
- */
-async function stopVerified(pid: number, ours: (command: string) => boolean, graceMs: number, signal: AbortSignal): Promise<void> {
-  const facts = await processFacts(pid, signal);
-  if (facts === null || !ours(facts.command)) return;
-  const id = facts.pgid === pid ? -pid : pid;
-  try {
-    process.kill(id, "SIGTERM");
-  } catch {
-    return;
-  }
-  for (let waited = 0; waited < graceMs; waited += 250) {
-    await new Promise((done) => setTimeout(done, 250));
-    if ((await processFacts(pid, signal)) === null) return;
-  }
-  const still = await processFacts(pid, signal);
-  if (still === null || !ours(still.command)) return;
-  try {
-    process.kill(id, "SIGKILL");
-  } catch {
-    // Gone between the check and the kill.
-  }
-}
-
-let retiring = false;
-
-async function retireLegacyRoute({ activeAgentTurns }: { activeAgentTurns: number }, signal: AbortSignal): Promise<RetireLegacyOutput> {
-  if (retiring) return { done: false, waits: "the last beat's retirement is still running", stopped: [], removed: null };
-  retiring = true;
-  try {
-    const relayReply = await localGet(`${LEGACY_RELAY_URL}${LEGACY_RELAY_HEALTH_PATH}`, 3_000, signal);
-    const relay = parseLegacyRelayHealth(relayReply?.status ?? null, relayReply?.body ?? null);
-    const proxyReply = await localGet(`${LEGACY_PROXY_URL}/health`, 3_000, signal);
-    const proxyNamed = parseLegacyProxyHealth(proxyReply?.status ?? null, proxyReply?.body ?? null);
-    const relayPid = await verifiedPid(relay?.pid ?? null, legacy.relayPidFile, isLegacyRelay, signal);
-    const proxyPid = await verifiedPid(proxyNamed, legacy.proxyPidFile, isLegacyProxy, signal);
-    const dirExists = await lstat(legacy.dir).then((s) => s.isDirectory(), () => false);
-    const plan = retirePlan({ proxyNamed, proxyPid, relay, relayPid, activeAgentTurns, dirExists });
-
-    const stopped: RetireLegacyOutput["stopped"] = [];
-    if (plan.stopProxy && proxyPid !== null) {
-      await stopVerified(proxyPid, isLegacyProxy, 5_000, signal);
-      stopped.push({ what: "proxy", pid: proxyPid });
-    }
-    // The relay drains what is in flight on TERM (at most 10 s) before it leaves.
-    if (plan.stopRelay && relayPid !== null) {
-      await stopVerified(relayPid, isLegacyRelay, 12_000, signal);
-      stopped.push({ what: "relay", pid: relayPid });
-    }
-    let removed: string | null = null;
-    if (plan.removeDir && removableDir(legacy.dir, homedir())) {
-      await rm(legacy.dir, { recursive: true, force: true });
-      removed = legacy.dir;
-    }
-    const done = plan.gone && !(await lstat(legacy.dir).then(() => true, () => false));
-    return { done, waits: plan.waits === null ? null : clip(plan.waits, 400), stopped, removed };
-  } finally {
-    retiring = false;
-  }
 }
 
 function run(
@@ -1861,8 +1731,6 @@ export default experimental_defineHostEntry({
     },
 
     memoryStatus: async (_input, { signal }) => readMemory(signal),
-
-    retireLegacyRoute: async (input, { signal }) => retireLegacyRoute(input, signal),
 
     localConfig: async (_input, { experimental_paths }) => {
       const text = await readLocalConfigText(homedir());

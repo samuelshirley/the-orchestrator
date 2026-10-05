@@ -58,7 +58,7 @@ describe("reportPathRefusal", () => {
 
   it("accepts an absolute .md path under the task's folder, nested too", () => {
     expect(check(good)).toBeNull();
-    expect(check(`${ROOT}/${TASK}/notes/jev-headroom-validation-report.md`)).toBeNull();
+    expect(check(`${ROOT}/${TASK}/notes/jev-validation-report.md`)).toBeNull();
   });
 
   it("refuses a relative path", () => {
@@ -184,7 +184,7 @@ describe("on a real disk", () => {
 
 describe("title and summary", () => {
   it("takes a one-line title of at most 120 characters", () => {
-    expect(reportTitleRefusal("Jev and Headroom validation")).toBeNull();
+    expect(reportTitleRefusal("Jev validation")).toBeNull();
     expect(reportTitleRefusal("x".repeat(120))).toBeNull();
     expect(reportTitleRefusal("x".repeat(121))).toMatch(/at most 120/);
     expect(reportTitleRefusal("   ")).toMatch(/title/);
@@ -194,7 +194,7 @@ describe("title and summary", () => {
   it("takes 1-3 summary lines, trimmed, and none at all", () => {
     expect(reportSummary(undefined)).toEqual({ ok: true, summary: null });
     expect(reportSummary(" \n ")).toEqual({ ok: true, summary: null });
-    expect(reportSummary(" Jev routes.\n\n Headroom is gone. ")).toEqual({ ok: true, summary: "Jev routes.\nHeadroom is gone." });
+    expect(reportSummary(" Jev routes.\n\n Routing holds. ")).toEqual({ ok: true, summary: "Jev routes.\nRouting holds." });
     expect(reportSummary("a\nb\nc")).toEqual({ ok: true, summary: "a\nb\nc" });
     expect(reportSummary("a\nb\nc\nd")).toEqual({ ok: false, reason: "The summary is 4 lines; at most 3." });
     expect(reportSummary("x".repeat(601))).toMatchObject({ ok: false });

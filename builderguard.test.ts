@@ -13,7 +13,6 @@ import {
   repoOf,
   type GuardContext,
 } from "./builderguard";
-import { LEGACY_SETTINGS_URL, withoutLegacyRoute } from "./legacyroute";
 
 const REPO = "/Users/me/Github/app";
 const WT = `${REPO}/.claude/worktrees/x`;
@@ -335,15 +334,10 @@ describe("builderSettings", () => {
     expect(builderSettings(["junk"], options)).toEqual(builderSettings({}, options));
   });
 
-  it("never sets a base URL, and a reused worktree loses the removed proxy's key (host writeBuilderGuard)", () => {
+  it("never sets a base URL, and keeps one the owner set", () => {
     const guarded = builderSettings({}, options);
     expect(JSON.stringify(guarded)).not.toContain("ANTHROPIC_BASE_URL");
-    // A worktree the first version routed: the key goes, the guard is the same.
-    const legacy = { ...guarded, env: { ANTHROPIC_BASE_URL: LEGACY_SETTINGS_URL } };
-    expect(builderSettings(withoutLegacyRoute(legacy) ?? legacy, options)).toEqual(guarded);
-    // An owner-set gateway is kept.
     const owner = { env: { ANTHROPIC_BASE_URL: "https://gw.example.com" } };
-    expect(withoutLegacyRoute(owner)).toBeNull();
     expect((builderSettings(owner, options).env as Record<string, string>).ANTHROPIC_BASE_URL).toBe("https://gw.example.com");
   });
 });

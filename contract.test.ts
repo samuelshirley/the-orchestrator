@@ -277,23 +277,6 @@ describe("Jev model routing", () => {
   });
 });
 
-describe("retireLegacyRoute", () => {
-  const { input, output } = hostContract.retireLegacyRoute;
-  it("takes only the agent turns running", () => {
-    expect(input.safeParse({ activeAgentTurns: 0 }).success).toBe(true);
-    expect(input.safeParse({ activeAgentTurns: -1 }).success).toBe(false);
-    expect(input.safeParse({}).success).toBe(false);
-    expect(input.safeParse({ activeAgentTurns: 0, dir: "/" }).success).toBe(false);
-  });
-  it("says what it stopped and removed, and whether it is done", () => {
-    expect(output.safeParse({ done: true, waits: null, stopped: [], removed: "/Users/me/.local/share/x" }).success).toBe(true);
-    expect(output.safeParse({ done: false, waits: "the relay waits for 1 agent turn to finish", stopped: [{ what: "proxy", pid: 4242 }], removed: null }).success).toBe(true);
-    expect(output.safeParse({ done: false, waits: null, stopped: [{ what: "claude", pid: 4242 }], removed: null }).success).toBe(false);
-    expect(output.safeParse({ done: false, waits: null, stopped: [{ what: "relay", pid: 1 }], removed: null }).success).toBe(false);
-    expect(output.safeParse({ done: true, waits: null, stopped: [] }).success).toBe(false);
-  });
-});
-
 describe("readReport", () => {
   const { input, output } = hostContract.readReport;
 

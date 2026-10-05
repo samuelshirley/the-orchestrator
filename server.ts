@@ -3340,7 +3340,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
     }
     if (chat !== null) {
-      configuredAgents.add(context.thread.id);
       // A chat sees only its own project's open tasks; the build cap stays shared.
       const tasks = chatTasks(store.tasks({ includeClosed: false }), chat.projectId);
       const summary = dossierSummary(tasks, store.tickets({ status: "open" }), null);
@@ -3362,7 +3361,6 @@ export default async function plugin(bb: BbPluginApi) {
       task: (id) => store.task(id),
     });
     if (role === null) return none;
-    configuredAgents.add(context.thread.id);
     const profile = profileOf({ name: context.project.name, gitRemoteUrl: context.project.gitRemoteUrl });
     if (role.kind === "task") {
       return { tools: TASK_TOOLS, skills: [], instructions: taskInstructions(role.task, context.project.name, profile, localConfig.config.chromeAccount ?? null) };
@@ -3373,23 +3371,6 @@ export default async function plugin(bb: BbPluginApi) {
       instructions: role.kind === "build" ? builderInstructions(role.owner, profile) : researchInstructions(role.owner, localConfig.config.chromeAccount ?? null),
     };
   });
-
-  /** Threads configure gave a role this server process: spawned, maybe not in the dossier yet. */
-  const configuredAgents = new Set<string>();
-
-  /** Known without asking bb: the dossier, or configure this process. */
-  function knownAgent(threadId: string): boolean {
-    if (chatOf(threadId) !== null) return true;
-    const task = store.taskByThread(threadId);
-    if (task !== null) return task.closedAt === null;
-    return store.child(threadId) !== null || configuredAgents.has(threadId);
-  }
-
-  /** The Orchestrator's agent turns running now: what the removed proxy's relay waits for (retireLegacy). */
-  async function activeAgentTurns(): Promise<number> {
-    const running = await bb.sdk.threads.listRunning();
-    return running.filter((thread) => knownAgent(thread.id)).length;
-  }
 
   // ---------------------------------------------------------------- events
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
@@ -4363,8 +4344,6 @@ export default async function plugin(bb: BbPluginApi) {
       });
       void reposInflight.catch((error: unknown) => bb.log.warn(`review check: repo read failed: ${describeError(error)}`));
     }
-    // On its own: the rest of the check failing never holds it up.
-    await retireLegacy();
     try {
       await loadLocalConfig();
       await readUsage();
@@ -4472,29 +4451,6 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`liveness: check failed: ${describeError(error)}`);
     } finally {
       checkingLiveness = false;
-    }
-  }
-
-  /**
-   * The removed token proxy's leftovers (legacyroute.ts retirePlan; the host
-   * does the work): one beat per liveness check until the host says done,
-   * then never again this server process. A failed call tries again next beat.
-   */
-  let legacyRetired = false;
-  let legacyWaitsLogged: string | null = null;
-  async function retireLegacy(): Promise<void> {
-    if (legacyRetired) return;
-    try {
-      const hostId = (await bb.sdk.system.config()).primaryHostId ?? null;
-      if (hostId === null) return;
-      const result = await host.call("retireLegacyRoute", { activeAgentTurns: await activeAgentTurns() }, { hostId, timeoutMs: 45_000 });
-      for (const { what, pid } of result.stopped) bb.log.info(`retired proxy: stopped its ${what} (pid ${pid})`);
-      if (result.removed !== null) bb.log.info(`retired proxy: removed ${result.removed}`);
-      if (result.waits !== null && result.waits !== legacyWaitsLogged) bb.log.info(`retired proxy: ${result.waits}`);
-      legacyWaitsLogged = result.waits;
-      legacyRetired = result.done;
-    } catch (error) {
-      bb.log.warn(`retired proxy: cleanup failed: ${describeError(error)}`);
     }
   }
 

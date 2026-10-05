@@ -265,7 +265,7 @@ describe("an automatic close with an open questions ticket (the uf5p case)", () 
   });
 });
 
-// task "Critical validation of jev and headroom", 2026-10-04: its findings were
+// task "Critical validation of Jev", 2026-10-04: its findings were
 // relayed in chat only; it was closed and archived with nothing to review.
 describe("a research task with its report open", () => {
   function reportTask() {

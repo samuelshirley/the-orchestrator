@@ -2,8 +2,8 @@
 // its full findings in a markdown file under bb's thread storage, submits it
 // (submit_report), and the owner reviews it from Needs you. The open report
 // ticket holds every automatic close like an open questions ticket
-// (tickets.ts); Mark reviewed closes the task. On 4 Oct the Jev/Headroom check
-// gave its findings only in Patches' chat, was closed and archived, and left
+// (tickets.ts); Mark reviewed closes the task. On 4 Oct a check task gave
+// its findings only in Patches' chat, was closed and archived, and left
 // nothing to review.
 //
 // Where a report may live, and what the board may read: an absolute path to

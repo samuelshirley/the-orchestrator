@@ -506,7 +506,7 @@ describe("the owner's name", () => {
   });
 });
 
-// task "Critical validation of jev and headroom", 2026-10-04: its verifiers'
+// task "Critical validation of Jev", 2026-10-04: its verifiers'
 // findings reached Kim only piecemeal in chat, and nothing was left to review.
 describe("review reports", () => {
   it("has a task whose result is findings write them in full and submit them before its Done line", () => {

@@ -342,9 +342,9 @@ is recorded in the dossier.
 ### Review reports
 
 A task started for a check, report or investigation leaves its findings as a
-file the owner reviews, not only in Patches' chat (on 4 Oct the Jev/Headroom
-check gave its verifiers' findings piecemeal in chat, was closed and archived,
-and left nothing to review). When a task's result is findings, not a code
+file the owner reviews, not only in Patches' chat (on 4 Oct a check task
+gave its verifiers' findings piecemeal in chat, was closed and archived, and
+left nothing to review). When a task's result is findings, not a code
 change (a check, status question, investigation, verification, research, or
 the owner asked for a report; a code task only if its brief asks), it writes
 them in full to `~/.bb/thread-storage/<taskId>/report.md`: a short "Where
@@ -654,29 +654,6 @@ until the project has a row.
   box deletes itself after 15 idle minutes or 4 hours, and a $20 cap applies.
   See [jev/README.md](../jev/README.md). `jev up` never runs without the owner's ok.
 
-## Removed: Headroom
-
-Headroom (headroom-ai 0.39.1, a local token-compression proxy in front of
-The Orchestrator's agents from 2 Oct) was removed on 5 Oct 2026. It altered
-the bytes Claude Code sends (it sorted and compacted the tools list whatever
-its settings), garbled agents' tool output, and left a `headroom_retrieve`
-tool_reference in a chat's history that got every later turn of that chat
-refused once it stopped. The rule that stands: whatever Claude Code sends
-must reach Anthropic byte-identical, so no proxy rewrites it, and anything
-like it later needs Sam's go.
-
-What is left (`legacyroute.ts`): `writeBuilderGuard` drops its
-`ANTHROPIC_BASE_URL=http://127.0.0.1:8791` from a reused worktree's
-`settings.local.json`, that exact value only. And a one-time retirement on
-the liveness beat (host `retireLegacyRoute`, until it says done): its proxy
-(8792) is stopped; its relay (8791) once no Orchestrator agent turn runs and
-nothing is in flight; each only by a pid ps shows as theirs, TERM then KILL;
-then, on a later beat that finds both gone, its install dir
-`~/.local/share/the-orchestrator/headroom` is removed, that path only. bb
-resolves a thread's contributed env on every turn and rebuilds the Claude
-session when it changed ("Execution settings changed"), so once the turns
-that started routed are over nothing points at 8791.
-
 ## Files
 
 | File | Holds |
@@ -719,7 +696,6 @@ that started routed are over nothing points at 8791.
 | `typesafe.ts` | TypeSafe's URL and model, reading `JEV_API_KEY` from `jev.env` or the repo `.env`, refusing a file others can read or a tracked `.env` |
 | `jevwatch.ts` | Jev, watch only: the two questions, reading an answer, the host's bounded ask, the actual outcome, the agreement report |
 | `jev/` | The Jev box: `cli.ts` (up, down, status, dry-run), `policy.ts` (cap, watchdog, Verda bodies, ledger), `box/` (setup, Caddy, watchdog, AnyJev shim) |
-| `legacyroute.ts` | What is left of the removed Headroom proxy: dropping its base URL from a reused worktree's settings, and the one-time retirement of its processes and install dir |
 | `builderguard.ts` | The builder guard: the Bash hook's command policy and the worktree's sandbox settings; node runs it directly |
 
 ## Memory

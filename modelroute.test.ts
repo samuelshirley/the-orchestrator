@@ -127,9 +127,9 @@ describe("scrub", () => {
       "Move to Sonnet 5.5 and Node 22.11.0 on 2026-10-02 at 14:30.",
       "See task_abc123, thread thr_zztzvrrswz and PR #123.",
       "Retry 3 times, wait 30 s, cap at 4 builds and 2000 ms.",
-      "Branch task/integrate-headroom-token-management from main.",
+      "Branch task/integrate-token-dashboard from main.",
       "Options: yes / no. Note: keep it small.",
-      "https://www.headroomlabs.ai/ and https://docs.typesafe.ai/api?page=2",
+      "https://example.com/tool and https://docs.typesafe.ai/api?page=2",
       "x >= 0.7 and a = b",
     ].join("\n");
     expect(scrub(plain)).toBe(plain);
